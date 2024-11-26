@@ -1,10 +1,10 @@
 defaults:
-  - prompter: llama2  # one of: llama2, tiny_llama (see corresponding .yaml in conf/prompter/)
-  - target_llm: vicuna_chat  # one of: llama2_chat, vicuna_chat, mistral_chat, pythia_chat, falcon_chat, gemma_chat, tiny_llama_chat (see corresponding .yaml in conf/target_llm/)
+  - prompter: tiny_llama  # one of: llama2, tiny_llama (see corresponding .yaml in conf/prompter/)
+  - target_llm: tiny_llama_chat  # one of: llama2_chat, vicuna_chat, mistral_chat, pythia_chat, falcon_chat, gemma_chat, tiny_llama_chat (see corresponding .yaml in conf/target_llm/)
   - _self_
   
 verbose: false
-seed: 2023
+seed: 2022
 reweight_loss: true
 output_dir: "./exp/local/${now:%Y.%m.%d}/${now:%H%M}"
 

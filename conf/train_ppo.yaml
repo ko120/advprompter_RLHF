@@ -1,0 +1,123 @@
+defaults:
+  - base_config
+  - _self_
+
+train:
+  epochs: 10
+  augment_target: true
+  dynamic_suffix_length: false
+  replay_buffer:
+    num_updates: 8
+    size: 256
+    fill_first: false
+    # priority = priority_factor.loss_delta * relu(loss_delta) + priority_factor.jailbreaking * jailbreaking
+    priority_factor:  # note: zero priority are not added to buffer
+      loss_delta: 1.0
+      jailbreaking: 1.0
+    priority_alpha: 1.5
+  generate_with_target_llm: true
+  reweight_loss: true
+  lr_factor_schedule:
+      schedule: constant
+      start_value: 1
+  warm_start:
+    enable: false
+    epochs: 20
+    do_eval_after: true
+    data:
+      dataset:
+        data_pth: "${data.data_dir}/${data.experiment_name}/warmstart/${target_llm.llm_params.model_name}.csv"
+        fixed_idx: null
+        fixed_dataset_size: null
+      dataloader:
+        shuffle: true
+        batch_size: 8
+        batch_multiplier: 1
+        num_workers: 0
+
+  prompter_optim:
+    optimizer: adam
+    optim_params:
+      lr: 5e-4
+    clip:
+      max_norm: null
+      max_value: null
+
+  q_params:
+    max_new_tokens: 30
+    num_beams: 4
+    candidates:
+      do_sample: true
+      temperature: 0.6
+      always_sample_best: true
+    beams:
+      do_sample: true
+      temperature: 0.6
+      always_sample_best: true
+    repetition_penalty: 1.2
+    top_k_per_iter: 48  # total number of evaluated candidates per iteration, split over beams (should be divisible by num_beams)
+    num_iters: 1  # number of iterations over which top_k is split
+    refine_q: false  # use gradient to refine dist over iterations
+    early_stopping_refine_q: false  # stop refining token if criterion does not decrease (NOTE: this is early_stopping per token, not as in huggingface)
+
+    lambda_val:
+      fine_tune: 100  # w2 in AutoDAN paper (50-100 is good)
+      candidates:
+        # either p1 or w1 should be set
+        p1: 0.1  # 0.1
+        w1: null  # 20
+        tol_p: 1e-2
+        tol: 1e-5
+        max_iters: 100
+
+  q_save_params:
+    enable_q_save: false
+    check_jailbreak: true
+    json_path: "./exp/sample.json"
+
+  ppo_params:
+    use_jb_as_score: true
+    max_loss_const: 1.0
+    config:
+      learning_rate: 5e-5
+      gamma: 0.95
+      lam: 0.95
+      mini_batch_size: 2
+      gradient_accumulation_steps: 2
+      use_score_scaling: true
+      use_score_norm: true
+      adap_kl_ctrl: true
+      init_kl_coef: 0.0
+      kl_penalty: "abs"
+    gen_params:
+      do_sample: true
+      temperature: 0.6
+      top_p: 0.9
+      max_new_tokens: 30
+
+
+
+# for debugging
+#prompter:
+#  gen_params:
+#    allow_non_ascii: true
+#  llm_params:
+#    checkpoint: 'stas/tiny-random-llama-2'
+#target_llm:
+#  llm_params:
+#    checkpoint: 'stas/tiny-random-llama-2'
+#device: 'cpu'
+#wandb_params:
+#  log_sequences_every:
+#    train: 1000
+#    eval: 1000
+#  log_table_at_epoch_end_only: true  # should be true for multi-epoch runs
+#  enable_wandb: false
+#  watch_params: null
+#data:
+#  train:
+#    dataloader:
+#      batch_size: 2
+#  eval:
+#    dataloader:
+#      batch_size: 2

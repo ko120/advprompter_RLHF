@@ -1,5 +1,5 @@
 llm_params:
-  device: 'cuda:0'
+  device: 'cuda:2'
   freeze: true
   dtype: float16
   lora_params: null

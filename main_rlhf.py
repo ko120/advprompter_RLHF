@@ -7,6 +7,7 @@ from copy import copy
 from datetime import datetime
 
 import csv
+import copy
 import os
 import hydra
 import numpy as np
@@ -34,9 +35,17 @@ from utils import (
     log_data,
     read_csv_file,
     hit_rate_at_n,
+    AdvPromptDataset
 )
-import pdb
+from trl import PPOConfig, PPOTrainer, RLOOConfig, RLOOTrainer, apply_chat_template
+
+from trl.core import LengthSampler
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification)
 from advprompteropt import advPrompterOpt, evaluate_prompt
+import pdb
+from copy import deepcopy
 
 setproctitle.setproctitle("model_train")
 
@@ -57,14 +66,19 @@ class Workspace:
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
+        self.reward_model = AutoModelForSequenceClassification.from_pretrained(
+        "cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr", trust_remote_code=True, num_labels=1
+    )
 
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
         )
-
+        
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)
+
+
 
     @torch.no_grad()
     def init_wandb(self):
@@ -102,12 +116,15 @@ class Workspace:
 
         pretrain_metrics = Metrics(prefix="pretrain/")
         pretrain_loader = get_dataloader(
-            data_pth=self.cfg.pretrain.dataset_pth,
-            shuffle=True,
-            augment_target=False,
-            batch_size=self.cfg.pretrain.batch_size,
+        data_pth=self.cfg.pretrain.dataset_pth,
+        shuffle=True,
+        augment_target=False,
+        batch_size=self.cfg.pretrain.batch_size,
+        
         )
-        for batch_idx, batch in enumerate(pretrain_loader):
+        pbar_batches = tqdm(pretrain_loader)
+        pbar_batches.set_description(f"Pre-training epoch {self.epoch}")
+        for batch_idx, batch in enumerate(pbar_batches):
             context = self.batch_to_context(batch)
             instruct = context.instruct
             suffix = context.suffix
@@ -183,13 +200,53 @@ class Workspace:
         self.prompter.train()
         self.target_llm.eval()
         train_metrics = Metrics(prefix="train/")
+        
+        data = []
+
+        # initialize loaders
         train_loader = get_dataloader(
             data_pth=self.cfg.train.dataset_pth,
             shuffle=True,
             augment_target=self.cfg.train.augment_target,
             batch_size=self.cfg.train.batch_size,
         )
-        data = []
+        
+        # initialize PPO 
+        self.total_train_steps = self.cfg.train.epochs * train_loader.effective_dataset_size
+        ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
+        # trl==0.12.1
+        self.ppo_config = PPOConfig(
+            num_ppo_epochs = self.total_train_steps,
+            **ppo_config_kwargs
+        )
+        self.ppo_trainer = PPOTrainer(
+            config=self.ppo_config,
+            policy=self.prompter.model,
+            ref_policy=deepcopy(self.prompter.model),
+            value_model = deepcopy(self.reward_model),
+            reward_model=self.reward_model,
+            train_dataset= AdvPromptDataset(data_pth=self.cfg.train.dataset_pth),
+            tokenizer=self.prompter.tokenizer,
+        )
+        # trl==0.11.4
+        # self.ppo_config = PPOConfig(
+        #     model_name=self.cfg.prompter.llm_params.model_name,
+        #     log_with="wandb" if self.enable_wandb else None,
+        #     batch_size=self.cfg.train.batch_size,
+        #     optimize_cuda_cache=True,
+        #     seed=self.cfg.seed,
+        #     steps=self.total_train_steps,
+        #     **ppo_config_kwargs
+        # )
+        # self.ppo_trainer = PPOTrainer(
+        #     self.ppo_config,
+        #     self.prompter.model,
+        #     ref_model=None,
+        #     tokenizer=self.prompter.tokenizer,
+        # )
+
+
+
 
         pbar_batches = tqdm(train_loader)
         pbar_batches.set_description(f"Training epoch {self.epoch}")
@@ -202,14 +259,18 @@ class Workspace:
             )
             with torch.no_grad():
 
-                # generate initial suffix
+                # ------- Rollout -----------
+
                 prompter_ar = self.prompter.generate_autoregressive(
                     key="suffix",
                     max_new_tokens=self.cfg.train.q_params.max_new_tokens,
                     instruct=instruct,
+                    use_basemodel = True
                 )
                 suffix = prompter_ar.response_sample
-
+                
+                                
+                pdb.set_trace()
                 # combine instruct and initial suffix to form initial full instruct
                 full_instruct_text = (
                     MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text
@@ -220,95 +281,120 @@ class Workspace:
                     device=self.target_llm.device,
                 )
 
-                # evaluate initial suffix
-                if self.verbose:
-                    tqdm.write(f"\nStep: {self.step} | Evaluating initial suffix...")
-                target_llm_tf, target_llm_ar, basemodel_tf = evaluate_prompt(
-                    cfg=self.cfg,
-                    instruct=instruct,
-                    suffix=suffix,
-                    full_instruct=full_instruct,
-                    target=target,
-                    prompter=self.prompter,
-                    target_llm=self.target_llm,
-                    generate_target_llm_response=log_sequences,
-                )
 
-                # generate optimized suffix
-                suffix = advPrompterOpt(
-                    cfg=self.cfg,
-                    instruct=instruct,
-                    target=target,
-                    prompter=self.prompter,
-                    target_llm=self.target_llm,
-                )
 
-                # combine instruct and optimized suffix to form optimized full instruct
-                full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
-                    merge_dtype="ids"
-                )
-                full_instruct = Seq(
-                    text=full_instruct_text.text,
-                    tokenizer=self.target_llm.tokenizer,
-                    device=self.target_llm.device,
-                )
+                # verify that self.prompter.generate_autoregressive == self.ppo_trainer.generate
+                # with torch.no_grad():
+                #     prompter_ar = self.prompter.generate_autoregressive(key='suffix', context=context, max_new_tokens=self.suffix_length)
+                #     context.suffix = prompter_ar.response_sample
+                # print("!!!!!! context.suffix.ids")
+                # pprint(context.suffix.ids)
+                # print("!!!!!! ppo_trainer.generate")
+                # pprint(prompter_responses)
+                # ----------------------------
 
-                # evaluate optimized suffix
-                if self.verbose:
-                    tqdm.write(f"\nStep: {self.step} | Evaluating optimized suffix...")
-                target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
-                    evaluate_prompt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        suffix=suffix,
-                        full_instruct=full_instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                        generate_target_llm_response=True,
-                    )
-                )
 
-                # store suffixes
-                for i in range(instruct.bs):
-                    data.append(
-                        (
-                            instruct.text[i],
-                            target.text[i],
-                            suffix.text[i],
-                            full_instruct.text[i],
-                        )
-                    )
 
-            self.add_to_replay_buffer(
-                instruct=instruct,
-                suffix=suffix,
-                target=target,
-                target_llm_tf=target_llm_tf,
-                target_llm_tf_opt=target_llm_tf_opt,
-                target_llm_ar_opt=target_llm_ar_opt,
-            )
 
-            prompter_tf_opt = self.finetune_prompter()
+            #     # combine instruct and initial suffix to form initial full instruct
+            #     full_instruct_text = (
+            #         MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text
+            #     )
+            #     full_instruct = Seq(
+            #         text=full_instruct_text,
+            #         tokenizer=self.target_llm.tokenizer,
+            #         device=self.target_llm.device,
+            #     )
 
-            log_data(
-                log_table=self.train_table,
-                metrics=train_metrics,
-                step=self.step,
-                split=self.cfg.train.dataset_key,
-                batch_idx=batch_idx,
-                test_prefixes=self.test_prefixes,
-                affirmative_prefixes=self.affirmative_prefixes,
-                log_sequences_to_wandb=log_sequences and self.enable_wandb,
-                log_metrics_to_wandb=self.enable_wandb,
-                prompter_ar=prompter_ar,
-                target_llm_tf=target_llm_tf,
-                target_llm_ar=target_llm_ar,
-                basemodel_tf=basemodel_tf,
-                prompter_tf_opt=prompter_tf_opt,
-            )
+            #     # evaluate initial suffix
+            #     if self.verbose:
+            #         tqdm.write(f"\nStep: {self.step} | Evaluating initial suffix...")
+            #     target_llm_tf, target_llm_ar, basemodel_tf = evaluate_prompt(
+            #         cfg=self.cfg,
+            #         instruct=instruct,
+            #         suffix=suffix,
+            #         full_instruct=full_instruct,
+            #         target=target,
+            #         prompter=self.prompter,
+            #         target_llm=self.target_llm,
+            #         generate_target_llm_response=log_sequences,
+            #     )
 
-            self.step += instruct.bs
+            #     # generate optimized suffix
+            #     suffix = advPrompterOpt(
+            #         cfg=self.cfg,
+            #         instruct=instruct,
+            #         target=target,
+            #         prompter=self.prompter,
+            #         target_llm=self.target_llm,
+            #     )
+
+            #     # combine instruct and optimized suffix to form optimized full instruct
+            #     full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
+            #         merge_dtype="ids"
+            #     )
+            #     full_instruct = Seq(
+            #         text=full_instruct_text.text,
+            #         tokenizer=self.target_llm.tokenizer,
+            #         device=self.target_llm.device,
+            #     )
+
+            #     # evaluate optimized suffix
+            #     if self.verbose:
+            #         tqdm.write(f"\nStep: {self.step} | Evaluating optimized suffix...")
+            #     target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
+            #         evaluate_prompt(
+            #             cfg=self.cfg,
+            #             instruct=instruct,
+            #             suffix=suffix,
+            #             full_instruct=full_instruct,
+            #             target=target,
+            #             prompter=self.prompter,
+            #             target_llm=self.target_llm,
+            #             generate_target_llm_response=True,
+            #         )
+            #     )
+
+            #     # store suffixes
+            #     for i in range(instruct.bs):
+            #         data.append(
+            #             (
+            #                 instruct.text[i],
+            #                 target.text[i],
+            #                 suffix.text[i],
+            #                 full_instruct.text[i],
+            #             )
+            #         )
+
+            # self.add_to_replay_buffer(
+            #     instruct=instruct,
+            #     suffix=suffix,
+            #     target=target,
+            #     target_llm_tf=target_llm_tf,
+            #     target_llm_tf_opt=target_llm_tf_opt,
+            #     target_llm_ar_opt=target_llm_ar_opt,
+            # )
+
+            # prompter_tf_opt = self.finetune_prompter()
+
+            # log_data(
+            #     log_table=self.train_table,
+            #     metrics=train_metrics,
+            #     step=self.step,
+            #     split=self.cfg.train.dataset_key,
+            #     batch_idx=batch_idx,
+            #     test_prefixes=self.test_prefixes,
+            #     affirmative_prefixes=self.affirmative_prefixes,
+            #     log_sequences_to_wandb=log_sequences and self.enable_wandb,
+            #     log_metrics_to_wandb=self.enable_wandb,
+            #     prompter_ar=prompter_ar,
+            #     target_llm_tf=target_llm_tf,
+            #     target_llm_ar=target_llm_ar,
+            #     basemodel_tf=basemodel_tf,
+            #     prompter_tf_opt=prompter_tf_opt,
+            # )
+
+            # self.step += instruct.bs
 
         suffix_dataset_key = f"{self.cfg.train.dataset_key}_opt_{self.step}"
         fields = ["instruct", "target", "suffix", "full_instruct"]

@@ -25,7 +25,8 @@ from transformers import (
     LlamaForCausalLM,
     MistralForCausalLM,
 )
-
+from trl import AutoModelForCausalLMWithValueHead
+import pdb
 
 def hit_rate_at_n(jb_stat, n):
     jb_sum_at_n = np.sum(jb_stat[:, :n], axis=1)
@@ -460,12 +461,30 @@ def llm_loader(llm_params, verbose=False):
             use_fast=use_fast,
             legacy=False,
         )
+        
         model = AutoModelForCausalLM.from_pretrained(
-            llm_params.checkpoint,
-            low_cpu_mem_usage=True,
-            torch_dtype=dtype,
-            device_map=llm_params.device,
-        )
+                llm_params.checkpoint,
+                low_cpu_mem_usage=True,
+                torch_dtype=dtype,
+                device_map=llm_params.device,
+            )
+        # if we use ppo and llm is prompter we wrap with value head
+        # if llm_params.ppo and llm_params.prompter:
+        #     lora_config_dct = dict(llm_params.lora_params.lora_config)
+        #     lora_config_dct["target_modules"] = [
+        #         m for m in llm_params.lora_params.lora_config["target_modules"]
+        #     ]
+        #     lora_config = LoraConfig(**lora_config_dct)
+        #     model = AutoModelForCausalLMWithValueHead(
+        #     model,
+        #     low_cpu_mem_usage=True,
+        #     torch_dtype=dtype,
+        #     device_map=llm_params.device,
+        #     peft_config = lora_config 
+        #     )
+            
+        
+            
     mem_after = get_total_allocated_memory()
 
     if verbose:
@@ -474,13 +493,14 @@ def llm_loader(llm_params, verbose=False):
         f" Mem usage model: {mem_after - mem_before:.2f} GB | Total Mem usage: {get_total_allocated_memory():.2f} GB",
     )
 
-    embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
+    # embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
 
     if llm_params.freeze:
         tqdm.write(" Freezing model...")
         for k, v in model.named_parameters():
             v.requires_grad = False
-
+            
+    
     if llm_params.lora_params is not None:
         if llm_params.lora_params.warmstart:
             tqdm.write(
@@ -499,9 +519,9 @@ def llm_loader(llm_params, verbose=False):
             ]
             lora_config = LoraConfig(**lora_config_dct)
             model = get_peft_model(model, lora_config)
-
+  
     print_trainable_parameters(model)
-    return model, tokenizer, embedding_matrix
+    return model, tokenizer 
 
 
 def get_embedding_matrix(model):

@@ -7,7 +7,7 @@ from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
-
+import pdb
 from sequence import Seq, MergedSeq, msg_to_seq
 from utils import (
     ReturnStruct,
@@ -25,7 +25,7 @@ class LLM(nn.Module):
         self.params = params
         self.verbose = verbose
 
-        self.model, self.tokenizer, self.embedding_matrix = llm_loader(
+        self.model, self.tokenizer = llm_loader(
             llm_params=params.llm_params, verbose=verbose
         )
 
@@ -52,13 +52,13 @@ class LLM(nn.Module):
         sorted_mask, indices = torch.sort(mask.long(), dim=1, stable=True)
 
         with self.model.disable_adapter() if use_basemodel else nullcontext():
-            if query_seq.is_hard:
+            if query_seq.is_hard: # discrete token
                 ids = query_seq.ids
                 sorted_ids = ids.gather(1, indices)
                 shifted_sorted_pred_logits = self.model(
                     input_ids=sorted_ids, attention_mask=sorted_mask
                 ).logits
-            else:
+            else: # embedding
                 embeds = query_seq.get_embed(self.embedding_matrix)
                 indices_extended = indices[:, :, None].repeat(1, 1, embeds.shape[-1])
                 sorted_embeds = embeds.gather(1, indices_extended)
@@ -67,6 +67,8 @@ class LLM(nn.Module):
                 ).logits
 
         # reverse the sort to get the original order (also account for the shift)
+        # in generate_autoregressive, it doesn't need reversing step since model.generate 
+        # generate output in autoregressive manner, so shifted pad tokens doesn't matter.
         dummy_pred_logits = torch.zeros_like(shifted_sorted_pred_logits[:, :1, :])
         sorted_pred_logits = torch.cat(
             [dummy_pred_logits, shifted_sorted_pred_logits[:, :-1, :]], dim=1
@@ -82,7 +84,8 @@ class LLM(nn.Module):
         )
 
         if self.disallowed_ids is not None:
-            pred_logits[:, :, self.disallowed_ids] = -1e10
+            # modified overflow error when target llm has dtype:float16 by using smaller mask value -1e+4
+            pred_logits[:, :, self.disallowed_ids] = -1e10 if pred_logits.dtype == torch.float32 else -1e4
         if torch.isnan(pred_logits).any() or torch.isinf(pred_logits).any():
             for i in range(pred_logits.shape[0]):
                 if torch.isnan(pred_logits[i]).any():
@@ -129,6 +132,7 @@ class LLM(nn.Module):
         query_seq, response_teacher_seq = self.prepare_prompt(
             context, up_to_key=key, return_key_seq=True
         )
+
         assert not response_teacher_seq.is_empty
         full_query_seq = MergedSeq([query_seq, response_teacher_seq])
         if detach_query:
@@ -174,6 +178,7 @@ class LLM(nn.Module):
 
         mask = query_seq.mask
         ids = query_seq.ids
+        # sortin mask and ids for stable and efficiency (it moves reverses order to move padding token infront)
         sorted_mask, indices = torch.sort(mask.long(), dim=1, stable=True)
         sorted_ids = ids.gather(1, indices)
 
@@ -197,7 +202,7 @@ class LLM(nn.Module):
                 return_dict_in_generate=True,
                 **gen_params,
             )
-
+        # remove original input ids
         output_ids = output.sequences[:, ids.shape[1] :]
 
         response_sample_seq = Seq(
@@ -210,14 +215,22 @@ class LLM(nn.Module):
         )
         return return_seqs
 
+
+
     def prepare_prompt(self, context, up_to_key=None, return_key_seq=False):
+        """
+        return seq until up_to_key, ex. if up_to_key=suffix, it returns before suffix prompt
+        when return_key_seq = True, it both returns input and response prompts
+        """
         seqs = []
         for msg_dct in self.params.prompt_manager.prompt_template:
+            # self.params.prompt_manager.prompt_template: 
+            # [{'key': 'system_message', 'msg': '<s>'}, {'key': 'hyper_instruct', 'msg': '{instruct}'}, {'key': 'suffix', 'msg': '{suffix}'}]
             if (
                 up_to_key is not None
                 and up_to_key == msg_dct.key
                 and not return_key_seq
-            ):
+            ): # when it reaches upto key, terminate purpose of upto key is to cut off seq until upto key
                 break
             seq = msg_to_seq(
                 msg=msg_dct.msg,
