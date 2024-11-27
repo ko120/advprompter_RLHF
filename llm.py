@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import pdb
 from sequence import Seq, MergedSeq, msg_to_seq
+from accelerate import Accelerator
 from utils import (
     ReturnStruct,
     autocast_decorator,
@@ -25,10 +26,16 @@ class LLM(nn.Module):
         self.params = params
         self.verbose = verbose
 
-        self.model, self.tokenizer = llm_loader(
-            llm_params=params.llm_params, verbose=verbose
-        )
+        if self.params.llm_params.accelerator:
+            self.accelerator = Accelerator()  # Initialize the Accelerator
+            self.device = self.accelerator.device  # Use the device provided by accelerate
+        else:
+            self.device = self.params.llm_params.device
 
+        self.model, self.tokenizer = llm_loader(
+            llm_params=params.llm_params, device= self.device, verbose=verbose
+        )
+        pdb.set_trace()
         if self.tokenizer.pad_token is None:
             if self.tokenizer.unk_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -36,8 +43,8 @@ class LLM(nn.Module):
                 # TODO: This is a hack I added because Falcon-7b-isntruct doe snot have a pad token
                 # We might run into trouble here because the Seq class will automatically treat any eos_token as a pad_token and set the padding mask to 0 for this token
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.device = self.params.llm_params.device
+                
+        
         if self.params.allow_non_ascii:
             self.disallowed_ids = None
         else:
@@ -129,18 +136,26 @@ class LLM(nn.Module):
     def generate_teacher_forced(
         self, key, detach_query=False, use_basemodel=False, **context
     ):
+        """
+        using given context, it outputs struct with original query, next seq prediction
+        and perplexity
+        """
+        # convert context dict with instruct and suffix to query (instruct) and 
+        # target response pair 
         query_seq, response_teacher_seq = self.prepare_prompt(
             context, up_to_key=key, return_key_seq=True
         )
-
         assert not response_teacher_seq.is_empty
         full_query_seq = MergedSeq([query_seq, response_teacher_seq])
         if detach_query:
             full_query_seq = full_query_seq.clone().detach()
 
+        # predicting next sequence using instruct + target sequence
         pred_full_query_seq = self.model_forward(
             query_seq=full_query_seq, use_basemodel=use_basemodel
         )
+
+        # cut off with same length as response_teacher_seq
         response_dist_seq = pred_full_query_seq[
             :, -response_teacher_seq.seq_len - 1 : -1
         ]

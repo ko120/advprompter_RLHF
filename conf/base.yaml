@@ -3,6 +3,14 @@ defaults:
   - target_llm: tiny_llama_chat  # one of: llama2_chat, vicuna_chat, mistral_chat, pythia_chat, falcon_chat, gemma_chat, tiny_llama_chat (see corresponding .yaml in conf/target_llm/)
   - _self_
   
+prompter:
+  llm_params:
+    accelerator: true
+
+target_llm:
+  llm_params:
+    accelerator: true
+
 verbose: false
 seed: 2022
 reweight_loss: true

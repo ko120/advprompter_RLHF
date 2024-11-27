@@ -5,6 +5,7 @@
 #
 from copy import copy
 from datetime import datetime
+from accelerate import load_checkpoint_and_dispatch
 
 import csv
 import os
@@ -55,6 +56,7 @@ class Workspace:
 
         tqdm.write("Initializing Prompter...")
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
+        
         tqdm.write("Initializing TargetLLM...")
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
 
@@ -209,6 +211,7 @@ class Workspace:
                     instruct=instruct,
                 )
                 suffix = prompter_ar.response_sample
+                
 
                 # combine instruct and initial suffix to form initial full instruct
                 full_instruct_text = (
@@ -220,7 +223,7 @@ class Workspace:
                     device=self.target_llm.device,
                 )
 
-                # evaluate initial suffix
+                # evaluate initial suffix, i.e. computing two loss objective
                 if self.verbose:
                     tqdm.write(f"\nStep: {self.step} | Evaluating initial suffix...")
                 target_llm_tf, target_llm_ar, basemodel_tf = evaluate_prompt(
@@ -233,7 +236,7 @@ class Workspace:
                     target_llm=self.target_llm,
                     generate_target_llm_response=log_sequences,
                 )
-
+                
                 # generate optimized suffix
                 suffix = advPrompterOpt(
                     cfg=self.cfg,
@@ -242,7 +245,6 @@ class Workspace:
                     prompter=self.prompter,
                     target_llm=self.target_llm,
                 )
-
                 # combine instruct and optimized suffix to form optimized full instruct
                 full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
                     merge_dtype="ids"

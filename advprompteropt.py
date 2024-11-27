@@ -385,6 +385,7 @@ def evaluate_prompt(
 ):
     basemodel_tf = None
     if suffix is not None and not suffix.is_empty:
+        # compute loss based on original prediction and next prediction
         basemodel_tf = prompter.compute_pred_loss_teacher_forced(
             key="suffix",
             instruct=instruct,
@@ -392,7 +393,7 @@ def evaluate_prompt(
             use_basemodel=True,
             loss_params=dict(hard_labels=True),
         )
-
+    # compute loss based on 
     target_llm_tf = target_llm.compute_pred_loss_teacher_forced(
         key="target",
         full_instruct=full_instruct,

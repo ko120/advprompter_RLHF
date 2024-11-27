@@ -25,7 +25,6 @@ from transformers import (
     LlamaForCausalLM,
     MistralForCausalLM,
 )
-from trl import AutoModelForCausalLMWithValueHead
 import pdb
 
 def hit_rate_at_n(jb_stat, n):
@@ -433,7 +432,7 @@ def read_csv_file(filename):
     return entries
 
 
-def llm_loader(llm_params, verbose=False):
+def llm_loader(llm_params, device, verbose=False):
     tqdm.write(
         f" Loading model: {llm_params.model_name} from {llm_params.checkpoint}...",
     )
@@ -451,7 +450,7 @@ def llm_loader(llm_params, verbose=False):
         )
         model = AutoModelForCausalLM.from_pretrained(
             llm_params.checkpoint, torch_dtype=dtype
-        ).to(llm_params.device)
+        ).to(device)
     else:
         use_fast = "pythia" in llm_params.checkpoint
         tokenizer = AutoTokenizer.from_pretrained(
@@ -466,8 +465,7 @@ def llm_loader(llm_params, verbose=False):
                 llm_params.checkpoint,
                 low_cpu_mem_usage=True,
                 torch_dtype=dtype,
-                device_map=llm_params.device,
-            )
+            ).to(device)
         # if we use ppo and llm is prompter we wrap with value head
         # if llm_params.ppo and llm_params.prompter:
         #     lora_config_dct = dict(llm_params.lora_params.lora_config)
