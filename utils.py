@@ -336,7 +336,7 @@ def log_data_to_table(log_table, bs, log_seqs):
 def autocast_decorator(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        if "cuda" in self.device:
+        if "cuda" in str(self.device):
             device = "cuda"
         else:
             device = self.device
@@ -460,6 +460,7 @@ def llm_loader(llm_params, device, verbose=False):
             use_fast=use_fast,
             legacy=False,
         )
+
         
         model = AutoModelForCausalLM.from_pretrained(
                 llm_params.checkpoint,
@@ -605,3 +606,7 @@ class NpEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
+
+
+
+

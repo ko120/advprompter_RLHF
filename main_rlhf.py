@@ -5,6 +5,7 @@
 #
 from copy import copy
 from datetime import datetime
+from accelerate import  Accelerator
 
 import csv
 import copy
@@ -37,9 +38,8 @@ from utils import (
     hit_rate_at_n,
     AdvPromptDataset
 )
-from trl import PPOConfig, PPOTrainer, RLOOConfig, RLOOTrainer, apply_chat_template
+from trl.trl.trainer import PPOConfig, PPOTrainer
 
-from trl.core import LengthSampler
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification)
@@ -57,22 +57,47 @@ class Workspace:
         self.cfg = cfg
         self.verbose = cfg.verbose
         self.enable_wandb = cfg.wandb_params.enable_wandb
+        self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
+        if self.enable_accelerator:
+            self.accelerator = Accelerator()
+        else:
+            self.accelerator = None
 
         if self.enable_wandb:
             self.init_wandb()
 
         tqdm.write("Initializing Prompter...")
-        self.prompter = LLM(cfg.prompter, verbose=self.verbose)
+        self.prompter = LLM(cfg.prompter, self.accelerator, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
-        self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
-        self.reward_model = AutoModelForSequenceClassification.from_pretrained(
-        "cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr", trust_remote_code=True, num_labels=1
-    )
+        self.target_llm = LLM(cfg.target_llm, self.accelerator, verbose=self.verbose)
+        self.reward_llm = AutoModelForSequenceClassification.from_pretrained(
+        "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
+        self.value_llm = AutoModelForSequenceClassification.from_pretrained(
+        "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
 
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
+        )
+         # initialize PPO 
+        pdb.set_trace()
+        self.train_dataset = AdvPromptDataset(data_pth=self.cfg.train.dataset_pth)
+        self.total_train_steps = self.cfg.train.epochs * len(self.train_dataset)
+        ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
+        # trl==0.12.1
+        self.ppo_config = PPOConfig(
+            num_ppo_epochs = self.total_train_steps,
+            **ppo_config_kwargs
+        )
+        self.ppo_trainer = PPOTrainer(
+            config=self.ppo_config,
+            policy=self.prompter.model,
+            ref_policy=None,
+            value_model = self.value_llm,
+            reward_model=self.reward_llm,
+            train_dataset= self.train_dataset,
+            tokenizer=self.prompter.tokenizer,
         )
         
         self.train_table = wandb.Table(columns=column_names)
@@ -211,23 +236,7 @@ class Workspace:
             batch_size=self.cfg.train.batch_size,
         )
         
-        # initialize PPO 
-        self.total_train_steps = self.cfg.train.epochs * train_loader.effective_dataset_size
-        ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
-        # trl==0.12.1
-        self.ppo_config = PPOConfig(
-            num_ppo_epochs = self.total_train_steps,
-            **ppo_config_kwargs
-        )
-        self.ppo_trainer = PPOTrainer(
-            config=self.ppo_config,
-            policy=self.prompter.model,
-            ref_policy=deepcopy(self.prompter.model),
-            value_model = deepcopy(self.reward_model),
-            reward_model=self.reward_model,
-            train_dataset= AdvPromptDataset(data_pth=self.cfg.train.dataset_pth),
-            tokenizer=self.prompter.tokenizer,
-        )
+       
         # trl==0.11.4
         # self.ppo_config = PPOConfig(
         #     model_name=self.cfg.prompter.llm_params.model_name,

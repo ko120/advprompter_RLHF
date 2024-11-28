@@ -18,24 +18,24 @@ from utils import (
     llm_loader,
     loss_seqs,
 )
+# used for PPO
+SIMPLE_CHAT_TEMPLATE = "{% for message in messages %}{{message['role'].capitalize() + ': ' + message['content'] + '\n\n'}}{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
 
 
 class LLM(nn.Module):
-    def __init__(self, params, verbose=False) -> None:
+    def __init__(self, params, accelerator, verbose=False) -> None:
         super().__init__()
         self.params = params
         self.verbose = verbose
 
-        if self.params.llm_params.accelerator:
-            self.accelerator = Accelerator()  # Initialize the Accelerator
-            self.device = self.accelerator.device  # Use the device provided by accelerate
+        if accelerator:
+            self.device = accelerator.device  # Use the device provided by accelerate
         else:
             self.device = self.params.llm_params.device
 
         self.model, self.tokenizer = llm_loader(
             llm_params=params.llm_params, device= self.device, verbose=verbose
         )
-        pdb.set_trace()
         if self.tokenizer.pad_token is None:
             if self.tokenizer.unk_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -43,6 +43,9 @@ class LLM(nn.Module):
                 # TODO: This is a hack I added because Falcon-7b-isntruct doe snot have a pad token
                 # We might run into trouble here because the Seq class will automatically treat any eos_token as a pad_token and set the padding mask to 0 for this token
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        if self.tokenizer.chat_template is None:
+            self.tokenizer.chat_template = SIMPLE_CHAT_TEMPLATE
                 
         
         if self.params.allow_non_ascii:

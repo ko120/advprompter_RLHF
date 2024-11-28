@@ -5,7 +5,7 @@
 #
 from copy import copy
 from datetime import datetime
-from accelerate import load_checkpoint_and_dispatch
+from accelerate import  Accelerator
 
 import csv
 import os
@@ -49,17 +49,20 @@ class Workspace:
         self.cfg = cfg
         self.verbose = cfg.verbose
         self.enable_wandb = cfg.wandb_params.enable_wandb
+        self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
+        if self.enable_accelerator:
+            self.accelerator = Accelerator()
+        else:
+            self.accelerator = None
 
         if self.enable_wandb:
             self.init_wandb()
 
         tqdm.write("Initializing Prompter...")
-        self.prompter = LLM(cfg.prompter, verbose=self.verbose)
-        
+        self.prompter = LLM(cfg.prompter, self.accelerator, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
-        self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
-
+        self.target_llm = LLM(cfg.target_llm, self.accelerator, verbose=self.verbose)
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
@@ -164,6 +167,7 @@ class Workspace:
                 self.save_prompter()
 
         tqdm.write("Starting training...")
+        
         pbar = tqdm(range(self.cfg.train.epochs))
         pbar.set_description("Training (epochs)")
         for self.epoch in pbar:
