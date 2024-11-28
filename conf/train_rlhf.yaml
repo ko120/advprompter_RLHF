@@ -70,6 +70,7 @@ train:
       lam: 0.95
       mini_batch_size: 2
       gradient_accumulation_steps: 2
+      missing_eos_penalty: True
     gen_params:
       do_sample: true
       temperature: 0.6

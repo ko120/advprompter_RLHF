@@ -6,6 +6,7 @@
 from copy import copy
 from datetime import datetime
 from accelerate import  Accelerator
+from peft import LoraConfig, PeftModel, get_peft_model
 
 import csv
 import copy
@@ -38,7 +39,7 @@ from utils import (
     hit_rate_at_n,
     AdvPromptDataset
 )
-from trl.trl.trainer import PPOConfig, PPOTrainer
+from custom_trl.trl.trainer import PPOConfig, PPOTrainer
 
 from transformers import (
     AutoModelForCausalLM,
@@ -81,7 +82,6 @@ class Workspace:
             self.cfg.data.affirmative_prefixes_pth
         )
          # initialize PPO 
-        pdb.set_trace()
         self.train_dataset = AdvPromptDataset(data_pth=self.cfg.train.dataset_pth)
         self.total_train_steps = self.cfg.train.epochs * len(self.train_dataset)
         ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
@@ -90,6 +90,9 @@ class Workspace:
             num_ppo_epochs = self.total_train_steps,
             **ppo_config_kwargs
         )
+
+    
+        
         self.ppo_trainer = PPOTrainer(
             config=self.ppo_config,
             policy=self.prompter.model,
@@ -97,9 +100,9 @@ class Workspace:
             value_model = self.value_llm,
             reward_model=self.reward_llm,
             train_dataset= self.train_dataset,
-            tokenizer=self.prompter.tokenizer,
+            tokenizer=self.prompter.tokenizer
         )
-        
+        # self.ppo_trainer.train()
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)
 

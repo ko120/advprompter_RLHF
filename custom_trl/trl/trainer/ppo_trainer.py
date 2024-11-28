@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from typing import Optional, Union
-
+import pdb
 import numpy as np
 import pandas as pd
 import torch
@@ -159,7 +159,6 @@ class PPOTrainer(Trainer):
         self.is_peft_model = is_peft_available() and isinstance(self.model, PeftModel)
         self.model_adapter_name = args.model_adapter_name
         self.ref_adapter_name = args.ref_adapter_name
-
         if ref_model:
             self.ref_model = ref_model
         elif self.is_peft_model:
@@ -422,6 +421,7 @@ class PPOTrainer(Trainer):
                         processing_class.pad_token_id,
                         generation_config,
                     )
+                    pdb.set_trace()
 
                 for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
                     query = queries[i : i + args.local_rollout_forward_batch_size]
