@@ -20,4 +20,5 @@ hydra-submitit-launcher==1.2.0
 rich
 datasets
 accelerate
+deepspeed
 

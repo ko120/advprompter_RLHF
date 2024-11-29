@@ -152,6 +152,7 @@ class Workspace:
             alpha=self.cfg.train.replay_buffer.priority_alpha,
             beta=1.0,
         )
+        # used later for finetune
         self.replay_buffer = ReplayBuffer(
             storage=ListStorage(self.cfg.train.replay_buffer.size),
             batch_size=self.cfg.train.batch_size,
@@ -215,7 +216,6 @@ class Workspace:
                     instruct=instruct,
                 )
                 suffix = prompter_ar.response_sample
-                
 
                 # combine instruct and initial suffix to form initial full instruct
                 full_instruct_text = (

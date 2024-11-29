@@ -43,7 +43,7 @@ def apply_repetition_penalty(logits, prev_ids, penalty):
     return logits_penalized
 
 
-def get_nonascii_toks(tokenizer, device="cpu"):
+def get_nonascii_toks(tokenizer):
 
     def is_ascii(s):
         return s.isascii() and s.isprintable()
@@ -62,7 +62,7 @@ def get_nonascii_toks(tokenizer, device="cpu"):
     if tokenizer.unk_token_id is not None:
         ascii_toks.append(tokenizer.unk_token_id)
 
-    return torch.tensor(ascii_toks, device=device)
+    return torch.tensor(ascii_toks)
 
 
 def compute_perplexity(id_seq, likelihood_seq):
@@ -464,7 +464,7 @@ def llm_loader(llm_params, device, verbose=False):
         
         model = AutoModelForCausalLM.from_pretrained(
                 llm_params.checkpoint,
-                low_cpu_mem_usage=True,
+                # low_cpu_mem_usage=True,
                 torch_dtype=dtype,
             ).to(device)
         # if we use ppo and llm is prompter we wrap with value head
@@ -492,7 +492,7 @@ def llm_loader(llm_params, device, verbose=False):
         f" Mem usage model: {mem_after - mem_before:.2f} GB | Total Mem usage: {get_total_allocated_memory():.2f} GB",
     )
 
-    # embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
+    embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
 
     if llm_params.freeze:
         tqdm.write(" Freezing model...")
@@ -519,8 +519,8 @@ def llm_loader(llm_params, device, verbose=False):
             lora_config = LoraConfig(**lora_config_dct)
             model = get_peft_model(model, lora_config)
   
-    print_trainable_parameters(model)
-    return model, tokenizer 
+    # print_trainable_parameters(model)
+    return model, tokenizer, embedding_matrix
 
 
 def get_embedding_matrix(model):
@@ -568,7 +568,7 @@ class AdvPromptDataset(Dataset):
 
 class AugmentDataLoader(DataLoader):
     def __init__(self, dataset, batch_size, augment_target, shuffle):
-        super().__init__(dataset=dataset, batch_size=batch_size, shuffle=shuffle)
+        super().__init__(dataset=dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
         self.effective_dataset_size = len(self.dataset)
         self.aufgment_target = augment_target
 

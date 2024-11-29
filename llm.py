@@ -23,17 +23,15 @@ SIMPLE_CHAT_TEMPLATE = "{% for message in messages %}{{message['role'].capitaliz
 
 
 class LLM(nn.Module):
-    def __init__(self, params, accelerator, verbose=False) -> None:
+    def __init__(self, params, verbose=False) -> None:
         super().__init__()
         self.params = params
         self.verbose = verbose
 
-        if accelerator:
-            self.device = accelerator.device  # Use the device provided by accelerate
-        else:
-            self.device = self.params.llm_params.device
+       
+        self.device = self.params.llm_params.device
 
-        self.model, self.tokenizer = llm_loader(
+        self.model, self.tokenizer, self.embedding_matrix = llm_loader(
             llm_params=params.llm_params, device= self.device, verbose=verbose
         )
         if self.tokenizer.pad_token is None:
@@ -47,11 +45,10 @@ class LLM(nn.Module):
         if self.tokenizer.chat_template is None:
             self.tokenizer.chat_template = SIMPLE_CHAT_TEMPLATE
                 
-        
         if self.params.allow_non_ascii:
             self.disallowed_ids = None
         else:
-            self.disallowed_ids = get_nonascii_toks(self.tokenizer, device=self.device)
+            self.disallowed_ids = get_nonascii_toks(self.tokenizer)
 
     def save_pretrained(self, save_path):
         self.model.save_pretrained(save_path, save_embedding_layers=True)
@@ -94,6 +91,7 @@ class LLM(nn.Module):
         )
 
         if self.disallowed_ids is not None:
+            self.disallowed_ids =  self.disallowed_ids.to(self.device)
             # modified overflow error when target llm has dtype:float16 by using smaller mask value -1e+4
             pred_logits[:, :, self.disallowed_ids] = -1e10 if pred_logits.dtype == torch.float32 else -1e4
         if torch.isnan(pred_logits).any() or torch.isinf(pred_logits).any():
@@ -202,12 +200,13 @@ class LLM(nn.Module):
 
         generation_config = self.model.generation_config
         if self.disallowed_ids is not None:
+            self.disallowed_ids = self.disallowed_ids.to(self.device)
             generation_config.suppress_tokens = self.disallowed_ids.tolist()
         generation_config.renormalize_logits = True
 
         if max_new_tokens is None:
             max_new_tokens = self.params.gen_params.max_new_tokens
-
+ 
         gen_params = dict(self.params.gen_params)
         gen_params["max_new_tokens"] = max_new_tokens
 
@@ -218,6 +217,7 @@ class LLM(nn.Module):
                 generation_config=generation_config,
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
+                return_legacy_cache=True,
                 **gen_params,
             )
         # remove original input ids

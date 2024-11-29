@@ -7,6 +7,7 @@ from copy import copy
 from datetime import datetime
 from accelerate import  Accelerator
 from peft import LoraConfig, PeftModel, get_peft_model
+from datasets import load_dataset
 
 import csv
 import copy
@@ -37,7 +38,7 @@ from utils import (
     log_data,
     read_csv_file,
     hit_rate_at_n,
-    AdvPromptDataset
+    AdvPromptDataset,
 )
 from custom_trl.trl.trainer import PPOConfig, PPOTrainer
 
@@ -47,6 +48,7 @@ from transformers import (
 from advprompteropt import advPrompterOpt, evaluate_prompt
 import pdb
 from copy import deepcopy
+
 
 setproctitle.setproctitle("model_train")
 
@@ -60,49 +62,54 @@ class Workspace:
         self.enable_wandb = cfg.wandb_params.enable_wandb
         self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
-        if self.enable_accelerator:
-            self.accelerator = Accelerator()
-        else:
-            self.accelerator = None
+        # if self.enable_accelerator:
+        #     self.accelerator = Accelerator(gradient_accumulation_steps=self.cfg.train.ppo_params.config.gradient_accumulation_steps)
+        # else:
+        #     self.accelerator = None
 
         if self.enable_wandb:
             self.init_wandb()
-
         tqdm.write("Initializing Prompter...")
-        self.prompter = LLM(cfg.prompter, self.accelerator, verbose=self.verbose)
+        self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
-        self.target_llm = LLM(cfg.target_llm, self.accelerator, verbose=self.verbose)
+        self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
         self.reward_llm = AutoModelForSequenceClassification.from_pretrained(
         "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
         self.value_llm = AutoModelForSequenceClassification.from_pretrained(
         "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
-
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
         )
-         # initialize PPO 
-        self.train_dataset = AdvPromptDataset(data_pth=self.cfg.train.dataset_pth)
-        self.total_train_steps = self.cfg.train.epochs * len(self.train_dataset)
+       
+        
+        self.train_loader = get_dataloader(
+            data_pth=self.cfg.train.dataset_pth,
+            shuffle=True,
+            augment_target=self.cfg.train.augment_target,
+            batch_size=self.cfg.train.batch_size,
+        )
+
+        self.total_train_steps = self.cfg.train.epochs * self.train_loader.effective_dataset_size
         ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
+        
         # trl==0.12.1
         self.ppo_config = PPOConfig(
             num_ppo_epochs = self.total_train_steps,
             **ppo_config_kwargs
         )
 
-    
-        
         self.ppo_trainer = PPOTrainer(
-            config=self.ppo_config,
-            policy=self.prompter.model,
-            ref_policy=None,
+            args=self.ppo_config,
+            cfg= self.cfg,
+            model=self.prompter,
+            ref_model=None,
             value_model = self.value_llm,
             reward_model=self.reward_llm,
-            train_dataset= self.train_dataset,
-            tokenizer=self.prompter.tokenizer
+            target_llm = self.target_llm,
+            train_loader= self.train_loader,
         )
-        # self.ppo_trainer.train()
+        self.ppo_trainer.train()
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)
 
@@ -238,7 +245,6 @@ class Workspace:
             augment_target=self.cfg.train.augment_target,
             batch_size=self.cfg.train.batch_size,
         )
-        
        
         # trl==0.11.4
         # self.ppo_config = PPOConfig(
@@ -282,7 +288,6 @@ class Workspace:
                 suffix = prompter_ar.response_sample
                 
                                 
-                pdb.set_trace()
                 # combine instruct and initial suffix to form initial full instruct
                 full_instruct_text = (
                     MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text

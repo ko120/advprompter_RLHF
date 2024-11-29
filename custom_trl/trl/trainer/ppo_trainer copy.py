@@ -66,12 +66,7 @@ from .utils import (
     print_rich_table,
     truncate_response,
 )
-
-# advprompter lib
-from utils import get_dataloader,dotdict
-from advprompteropt import advPrompterOpt, evaluate_prompt
-from sequence import MergedSeq, Seq, collate_fn
-
+from utils import get_dataloader
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model
@@ -112,15 +107,13 @@ class PPOTrainer(Trainer):
     def __init__(
         self,
         args: PPOConfig,
-        model: nn.Module,
-        reward_model: nn.Module,
-        target_llm: nn.Module,
-        train_loader: DataLoader,
-        cfg, # advprompter config
         processing_class: Optional[
             Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
-        ]=None,
-        ref_model: Optional[nn.Module]= None,
+        ],
+        model: nn.Module,
+        ref_model: Optional[nn.Module],
+        reward_model: nn.Module,
+        train_loader: DataLoader,
         value_model: Optional[nn.Module] = None,
         data_collator: Optional[DataCollatorWithPadding] = None,
         eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
@@ -136,11 +129,8 @@ class PPOTrainer(Trainer):
             )
 
         self.args = args
-        self.cfg = cfg
         self.processing_class = processing_class
-        # assigning model component from prompter
-        self.prompter = model
-        self.model = model.model
+        self.model = model
 
         # Define the collator if not provided
         if data_collator is None:
@@ -177,7 +167,6 @@ class PPOTrainer(Trainer):
             self.ref_model = create_reference_model(self.model)
 
         self.reward_model = reward_model
-        self.target_llm = target_llm
         self.dataloader = train_loader
         self.train_dataset_len = self.dataloader.effective_dataset_size
         self.value_model = value_model
@@ -193,12 +182,6 @@ class PPOTrainer(Trainer):
             args.total_episodes = int(args.num_train_epochs * self.train_dataset_len)
         accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
         self.accelerator = accelerator
-
-        # change device for prompter and target llm
-        self.prompter.device = accelerator.device
-        self.prompter.model = self.prompter.model.to(accelerator.device)
-        self.target_llm.device = accelerator.device
-        self.target_llm.model = self.target_llm.model.to(accelerator.device)
         args.world_size = accelerator.num_processes
         args.local_batch_size = (
             args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
@@ -304,10 +287,6 @@ class PPOTrainer(Trainer):
         if self.is_deepspeed_enabled:
             self.reward_model = prepare_deepspeed(
                 self.reward_model, args.per_device_train_batch_size, args.fp16, args.bf16
-            )
-            # passing model objective from LLM object for deepspeed init
-            self.target_llm  = prepare_deepspeed(
-                self.target_llm.model, args.per_device_train_batch_size, args.fp16, args.bf16
             )
 
             if self.ref_model is None:
@@ -422,18 +401,13 @@ class PPOTrainer(Trainer):
             self.deepspeed = self.policy_and_value
             self.model_wrapped = self.policy_and_value
 
-        # iterate through batch
         for update in range(1, args.num_total_batches + 1):
             self.state.episode += 1 * args.batch_size
-            # extracting batch
-            batch = next(iter_dataloader)
+            data = next(iter_dataloader)
             with torch.no_grad():
-                context = self.batch_to_context(batch)
-                instruct = context.instruct
-                target = context.target
                 
-                # queries = data["input_ids"].to(device)
-                context_length = instruct.ids.shape[1]
+                queries = data["input_ids"].to(device)
+                context_length = queries.shape[1]
                 responses = []
                 postprocessed_responses = []
                 logprobs = []
@@ -442,59 +416,15 @@ class PPOTrainer(Trainer):
                 sequence_lengths = []
                 values = []
 
-                
-                # unwrap_model_for_generation: context manager for unwrapping neccesary for distributed training
+                pdb.set_trace()
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-                    # query_responses, logitss = batch_generation(
-                    #     unwrapped_model.policy,
-                    #     queries,
-                    #     args.local_rollout_forward_batch_size,
-                    #     processing_class.pad_token_id,
-                    #     generation_config,
-                    # )
-                    
-
-                    # generate initial suffix
-                    prompter_ar = self.prompter.generate_autoregressive(
-                        key="suffix",
-                        max_new_tokens=self.cfg.train.q_params.max_new_tokens,
-                        instruct=instruct,
+                    query_responses, logitss = batch_generation(
+                        unwrapped_model.policy,
+                        queries,
+                        args.local_rollout_forward_batch_size,
+                        processing_class.pad_token_id,
+                        generation_config,
                     )
-                    suffix = prompter_ar.response_sample
-                    pdb.set_trace()
-                    # generate optimized suffix
-                    suffix = advPrompterOpt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                    )
-
-                    # combine instruct and optimized suffix to form optimized full instruct
-                    full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
-                        merge_dtype="ids"
-                    )
-                    full_instruct = Seq(
-                        text=full_instruct_text.text,
-                        tokenizer=self.target_llm.tokenizer,
-                        device=self.target_llm.device,
-                    )
-
-                    # evaluate optimized suffix, i.e. target_llm_tf_opt = attack , basemodel_tf_opt = fleuncy
-                    target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
-                    evaluate_prompt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        suffix=suffix,
-                        full_instruct=full_instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                        generate_target_llm_response=True,
-                    )
-                    )
-    
                 
                 # generate query.ids, response.ids, response logit here with llm.auto regressive
 
@@ -748,28 +678,7 @@ class PPOTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial=None, metrics=None)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
-    
-    def batch_to_context(self, batch):
-        model_map = dict(
-            instruct=self.prompter,
-            suffix=self.prompter,
-            target=self.target_llm,
-            full_instruct=self.target_llm,
-        )
-        context = dotdict()
-        for key, model in model_map.items():
-            
-            if key in batch.keys():
-                seq = Seq(
-                    text=batch[key],
-                    tokenizer=model.tokenizer,
-                    device=model.device,
-                )
-            else:
-                seq = None
-            context[key] = seq
-        return context
-    
+
     def generate_completions(self, sampling: bool = False):
         args = self.args
         processing_class = self.processing_class
