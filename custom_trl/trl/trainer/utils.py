@@ -20,7 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any, Literal, Optional, Union
-
+import pdb
 import datasets
 import numpy as np
 import pandas as pd
@@ -1099,23 +1099,27 @@ def get_reward(
             - `reward_logits` (`torch.Tensor`):
                 The logits for the reward model.
             - `final_rewards` (`torch.Tensor`):
-                The final rewards for each query response.
+                The final rewards of last token before pad (single scalarw)
             - `sequence_lengths` (`torch.Tensor`):
                 The lengths of the sequences in the query responses.
     """
+    
     attention_mask = query_responses != pad_token_id
     position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
-    lm_backbone = getattr(model, model.base_model_prefix)
+    # lm_backbone = getattr(model, model.base_model_prefix)
+    # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
-    output = lm_backbone(
+    pdb.set_trace()
+    output = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
         return_dict=True,
         output_hidden_states=True,
-        use_cache=False,  # otherwise mistral-based RM would error out
+        # use_cache=False,  # otherwise mistral-based RM would error out
     )
-    reward_logits = model.score(output.hidden_states[-1])
+    # reward_logits = model.score(output.hidden_states[-1])
+    reward_logits = output.logits
     sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
     # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
     return (

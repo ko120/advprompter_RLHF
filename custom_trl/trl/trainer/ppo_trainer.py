@@ -119,7 +119,7 @@ class PPOTrainer(Trainer):
         cfg, # advprompter config
         processing_class: Optional[
             Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
-        ]=None,
+        ],
         ref_model: Optional[nn.Module]= None,
         value_model: Optional[nn.Module] = None,
         data_collator: Optional[DataCollatorWithPadding] = None,
@@ -375,10 +375,10 @@ class PPOTrainer(Trainer):
 
         iter_dataloader = iter(repeat_generator())
         generation_config = GenerationConfig(
-            max_new_tokens=args.response_length,
-            temperature=(args.temperature + 1e-7),
+            max_new_tokens=self.cfg.train.ppo_params.gen_params.max_new_tokens,
+            temperature=self.cfg.train.ppo_params.gen_params.temperature,
             top_k=0.0,
-            top_p=1.0,
+            top_p=self.cfg.train.ppo_params.gen_params.top_p,
             do_sample=True,
         )
 
@@ -445,13 +445,15 @@ class PPOTrainer(Trainer):
                 
                 # unwrap_model_for_generation: context manager for unwrapping neccesary for distributed training
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-                    # query_responses, logitss = batch_generation(
-                    #     unwrapped_model.policy,
-                    #     queries,
-                    #     args.local_rollout_forward_batch_size,
-                    #     processing_class.pad_token_id,
-                    #     generation_config,
-                    # )
+                    
+                    # query_responses= [query+response]
+                    query_responses, logitss = batch_generation(
+                        unwrapped_model.policy,
+                        instruct.ids,
+                        args.local_rollout_forward_batch_size,
+                        processing_class.pad_token_id,
+                        generation_config,
+                    )
                     
 
                     # generate initial suffix
@@ -461,45 +463,53 @@ class PPOTrainer(Trainer):
                         instruct=instruct,
                     )
                     suffix = prompter_ar.response_sample
-                    pdb.set_trace()
-                    # generate optimized suffix
-                    suffix = advPrompterOpt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                    )
+              
+                    # # generate optimized suffix
+                    # suffix = advPrompterOpt(
+                    #     cfg=self.cfg,
+                    #     instruct=instruct,
+                    #     target=target,
+                    #     prompter=self.prompter,
+                    #     target_llm=self.target_llm,
+                    # )
 
-                    # combine instruct and optimized suffix to form optimized full instruct
-                    full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
-                        merge_dtype="ids"
-                    )
-                    full_instruct = Seq(
-                        text=full_instruct_text.text,
-                        tokenizer=self.target_llm.tokenizer,
-                        device=self.target_llm.device,
-                    )
+                    # # combine instruct and optimized suffix to form optimized full instruct
+                    # full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
+                    #     merge_dtype="ids"
+                    # )
+                    # full_instruct = Seq(
+                    #     text=full_instruct_text.text,
+                    #     tokenizer=self.target_llm.tokenizer,
+                    #     device=self.target_llm.device,
+                    # )
 
-                    # evaluate optimized suffix, i.e. target_llm_tf_opt = attack , basemodel_tf_opt = fleuncy
-                    target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
-                    evaluate_prompt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        suffix=suffix,
-                        full_instruct=full_instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                        generate_target_llm_response=True,
-                    )
-                    )
+                    # # evaluate optimized suffix, i.e. target_llm_tf_opt = attack , basemodel_tf_opt = fleuncy
+                    # target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
+                    # evaluate_prompt(
+                    #     cfg=self.cfg,
+                    #     instruct=instruct,
+                    #     suffix=suffix,
+                    #     full_instruct=full_instruct,
+                    #     target=target,
+                    #     prompter=self.prompter,
+                    #     target_llm=self.target_llm,
+                    #     generate_target_llm_response=True,
+                    # )
+                    # )
     
                 
                 # generate query.ids, response.ids, response logit here with llm.auto regressive
-
-                for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
-                    query = queries[i : i + args.local_rollout_forward_batch_size]
+                for i in range(0, instruct.ids.shape[0], args.local_rollout_forward_batch_size):
+                    # query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
+                    # query_response = suffix.ids[i : i + args.local_rollout_forward_batch_size]
+                    # response = query_response
+                    # logits = instruct.logits[i : i + args.local_rollout_forward_batch_size]
+                    # all_logprob = F.log_softmax(logits, dim=-1)
+                    # logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
+                    # del logits, all_logprob
+                    # torch.cuda.empty_cache()
+                    
+                    query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
                     response = query_response[:, context_length:]
                     logits = logitss[i : i + args.local_rollout_forward_batch_size]
@@ -508,36 +518,45 @@ class PPOTrainer(Trainer):
                     del logits, all_logprob
                     torch.cuda.empty_cache()
 
+                    # forward ref_policy
                     if ref_policy is None:
                         with self.null_ref_context():
                             ref_output = forward(model.policy, query_response, processing_class.pad_token_id)
                     else:
                         ref_output = forward(ref_policy, query_response, processing_class.pad_token_id)
-                    ref_logits = ref_output.logits[:, context_length - 1 : -1]
+                    # forward target model to obtain response from target model
+                    # target_response_seq = self.target_llm.model_forward(query_response)
+
+                    # extracting response logit only since query_response=[input+response]
+                    ref_logits = ref_output.logits[:, context_length - 1 : -1] # (B,response_length,emb_dim)
+                    # ref_logits = ref_output.logits
                     ref_logits /= args.temperature + 1e-7
-                    ref_all_logprob = F.log_softmax(ref_logits, dim=-1)
-                    ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
+                    ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
+                    # extract logprob corresponding to response token , i.e. pi_ref(a|s)
+                    ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
                     del ref_output, ref_logits, ref_all_logprob
                     torch.cuda.empty_cache()
-
+                    # use target_response_seq as input to reward model
                     # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
-                    postprocessed_response = response
+                    postprocessed_response = response # (B,response_length)
+                    
                     if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
                             args.stop_token_id, processing_class.pad_token_id, response
                         )
 
                     # Response Processing 2. run reward model on the truncated responses
-                    postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
-                    sequence_length = first_true_indices(postprocessed_response == processing_class.pad_token_id) - 1
+                    postprocessed_query_response = torch.cat((query, postprocessed_response), 1) # (B, query_len+ response_len)
+                    sequence_length = first_true_indices(postprocessed_response == processing_class.pad_token_id) - 1 # response_len - 1
                     unwrapped_value_model = accelerator.unwrap_model(model).value_model
+                    # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, processing_class.pad_token_id, context_length
-                    )
+                    ) # (B,logit_shape)
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
                     _, score, _ = get_reward(
                         reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
-                    )
+                    ) # (B,logit_shape)
 
                     responses.append(response)
                     postprocessed_responses.append(postprocessed_response)

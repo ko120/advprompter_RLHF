@@ -76,6 +76,8 @@ class LLM(nn.Module):
         # reverse the sort to get the original order (also account for the shift)
         # in generate_autoregressive, it doesn't need reversing step since model.generate 
         # generate output in autoregressive manner, so shifted pad tokens doesn't matter.
+        # Apparently, decoder only models need left padding:
+        # https://github.com/huggingface/transformers/issues/26072
         dummy_pred_logits = torch.zeros_like(shifted_sorted_pred_logits[:, :1, :])
         sorted_pred_logits = torch.cat(
             [dummy_pred_logits, shifted_sorted_pred_logits[:, :-1, :]], dim=1

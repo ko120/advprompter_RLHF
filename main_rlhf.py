@@ -52,7 +52,6 @@ from copy import deepcopy
 
 setproctitle.setproctitle("model_train")
 
-
 class Workspace:
     def __init__(self, cfg):
         pl.seed_everything(cfg.seed)
@@ -81,6 +80,8 @@ class Workspace:
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
         )
+
+        
        
         
         self.train_loader = get_dataloader(
@@ -89,7 +90,7 @@ class Workspace:
             augment_target=self.cfg.train.augment_target,
             batch_size=self.cfg.train.batch_size,
         )
-
+        
         self.total_train_steps = self.cfg.train.epochs * self.train_loader.effective_dataset_size
         ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
         
@@ -102,6 +103,7 @@ class Workspace:
         self.ppo_trainer = PPOTrainer(
             args=self.ppo_config,
             cfg= self.cfg,
+            processing_class = self.prompter.tokenizer,
             model=self.prompter,
             ref_model=None,
             value_model = self.value_llm,
@@ -239,12 +241,12 @@ class Workspace:
         data = []
 
         # initialize loaders
-        train_loader = get_dataloader(
-            data_pth=self.cfg.train.dataset_pth,
-            shuffle=True,
-            augment_target=self.cfg.train.augment_target,
-            batch_size=self.cfg.train.batch_size,
-        )
+        # train_loader = get_dataloader(
+        #     data_pth=self.cfg.train.dataset_pth,
+        #     shuffle=True,
+        #     augment_target=self.cfg.train.augment_target,
+        #     batch_size=self.cfg.train.batch_size,
+        # )
        
         # trl==0.11.4
         # self.ppo_config = PPOConfig(
@@ -266,7 +268,7 @@ class Workspace:
 
 
 
-        pbar_batches = tqdm(train_loader)
+        pbar_batches = tqdm(self.train_loader)
         pbar_batches.set_description(f"Training epoch {self.epoch}")
         for batch_idx, batch in enumerate(pbar_batches):
             context = self.batch_to_context(batch)
@@ -289,16 +291,31 @@ class Workspace:
                 
                                 
                 # combine instruct and initial suffix to form initial full instruct
+                # padding moved all the way to right 
+                # #tensor([12037,   263,  4933,   393,   508,   367,  1304,   304, 15833,   964,
+                #     2305, 29915, 29879, 27656,   322,  6597,  2472, 29889,  2398, 29892,
+                #     591,   505,   694,  2969,  3692,   445,   338,   825,   278,  5434,
+                #     310, 15833,   292,   674,   367,   763, 29889,  1334,   526,   451,
+                #     297,   263,  2602,   304,   367,  2221,   304,     0,     0,     0,
+                #         0,     0,     0,     0,     0,     0,     0]
+                # while query_response (original ppo implementatation)
+                #(Pdb) query_responses[0]
+                # tensor([12037,   263,  4933,   393,   508,   367,  1304,   304, 15833,   964,
+                #          2305, 29915, 29879, 27656,   322,  6597,  2472,     0,     0,     0,
+                #             0,     0,     0,     0,     0,     0,     0, 29889,    13,  1576,
+                #         15483,   338,  1641,  8906,   491,   278,  3014,   310,   951,   293,
+                #          4156,   297, 24771,   411,   278,  3014,   310,  2296,   600,   969,
+                #         29889,    13,  1576,  4933,   338,   263,  6601], device='cuda:0')
                 full_instruct_text = (
                     MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text
                 )
+                
                 full_instruct = Seq(
                     text=full_instruct_text,
                     tokenizer=self.target_llm.tokenizer,
                     device=self.target_llm.device,
                 )
-
-
+               
 
                 # verify that self.prompter.generate_autoregressive == self.ppo_trainer.generate
                 # with torch.no_grad():
