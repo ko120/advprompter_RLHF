@@ -241,7 +241,6 @@ class PPOTrainer(Trainer):
         self.create_optimizer_and_scheduler(
             num_training_steps=args.num_total_batches
         )  # note that we are calling `self.lr_scheduler.step()` manually only at the batch level
-
         #########
         ### trainer specifics
         #########
@@ -432,7 +431,7 @@ class PPOTrainer(Trainer):
                 instruct = context.instruct
                 target = context.target
                 
-                # queries = data["input_ids"].to(device)
+                queries = instruct.ids
                 context_length = instruct.ids.shape[1]
                 responses = []
                 postprocessed_responses = []
@@ -445,23 +444,25 @@ class PPOTrainer(Trainer):
                 
                 # unwrap_model_for_generation: context manager for unwrapping neccesary for distributed training
                 with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-                    
-                    # query_responses= [query+response]
+                    # ORIGINAL
+                    # query_responses [query+response] (B,query_len + response_len)
+                    # logitss  [response logit] (B,response_len)
                     query_responses, logitss = batch_generation(
                         unwrapped_model.policy,
-                        instruct.ids,
+                        queries,
                         args.local_rollout_forward_batch_size,
                         processing_class.pad_token_id,
                         generation_config,
                     )
                     
-
-                    # generate initial suffix
+                    # ADVPROMPTER
+                    # generate initial suffix 
                     prompter_ar = self.prompter.generate_autoregressive(
                         key="suffix",
                         max_new_tokens=self.cfg.train.q_params.max_new_tokens,
                         instruct=instruct,
                     )
+                    # prompter_ar struct {query, response_sample}
                     suffix = prompter_ar.response_sample
               
                     # # generate optimized suffix
@@ -474,14 +475,17 @@ class PPOTrainer(Trainer):
                     # )
 
                     # # combine instruct and optimized suffix to form optimized full instruct
-                    # full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
+                    # difference between original query response is that it shifted padding to the right
+                    # while original one has in between paddings between instruct and suffix
+                    # query_responses = MergedSeq(seqs=[instruct, suffix]).to_seq(
                     #     merge_dtype="ids"
                     # )
-                    # full_instruct = Seq(
-                    #     text=full_instruct_text.text,
+                    # query_response = Seq(
+                    #     text=query_response.text,
                     #     tokenizer=self.target_llm.tokenizer,
                     #     device=self.target_llm.device,
                     # )
+                    # query_response = query_response.ids
 
                     # # evaluate optimized suffix, i.e. target_llm_tf_opt = attack , basemodel_tf_opt = fleuncy
                     # target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
@@ -489,7 +493,7 @@ class PPOTrainer(Trainer):
                     #     cfg=self.cfg,
                     #     instruct=instruct,
                     #     suffix=suffix,
-                    #     full_instruct=full_instruct,
+                    #     full_instruct=query_response,
                     #     target=target,
                     #     prompter=self.prompter,
                     #     target_llm=self.target_llm,
@@ -500,51 +504,82 @@ class PPOTrainer(Trainer):
                 
                 # generate query.ids, response.ids, response logit here with llm.auto regressive
                 for i in range(0, instruct.ids.shape[0], args.local_rollout_forward_batch_size):
+                    ## ADVPROMPTER
+                    # processing smaller batch size with increament by args.local_rollout_forward_batch_size
                     # query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
-                    # query_response = suffix.ids[i : i + args.local_rollout_forward_batch_size]
-                    # response = query_response
+                    # response = suffix.ids[i : i + args.local_rollout_forward_batch_size]
                     # logits = instruct.logits[i : i + args.local_rollout_forward_batch_size]
                     # all_logprob = F.log_softmax(logits, dim=-1)
+                    ## extract logprobs for response token
                     # logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
                     # del logits, all_logprob
                     # torch.cuda.empty_cache()
-                    
-                    query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
+                    # ORIGINAL
+                    query = queries[i : i + args.local_rollout_forward_batch_size] 
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
                     response = query_response[:, context_length:]
-                    logits = logitss[i : i + args.local_rollout_forward_batch_size]
+                    # logit of response seq
+                    logits = logitss[i : i + args.local_rollout_forward_batch_size] 
                     all_logprob = F.log_softmax(logits, dim=-1)
-                    logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
+                    # extracting only response logit
+                    logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) 
                     del logits, all_logprob
                     torch.cuda.empty_cache()
 
+                    # ORIGINAL
                     # forward ref_policy
                     if ref_policy is None:
                         with self.null_ref_context():
                             ref_output = forward(model.policy, query_response, processing_class.pad_token_id)
                     else:
-                        ref_output = forward(ref_policy, query_response, processing_class.pad_token_id)
-                    # forward target model to obtain response from target model
+                        ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
+
+                    ##ADVPROMPTER
+                    # if ref_policy is None:
+                    #     with self.null_ref_context():
+                    #         ref_output = self.prompter.model_forward(query_response)
+                    #        # struct with logits of instruct + query
+                    # else:
+                    #     ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
+                    ## forward target model to obtain response from target model
                     # target_response_seq = self.target_llm.model_forward(query_response)
 
+
+                    
+
+                    # ORIGINAL
                     # extracting response logit only since query_response=[input+response]
                     ref_logits = ref_output.logits[:, context_length - 1 : -1] # (B,response_length,emb_dim)
-                    # ref_logits = ref_output.logits
                     ref_logits /= args.temperature + 1e-7
                     ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
                     # extract logprob corresponding to response token , i.e. pi_ref(a|s)
                     ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
                     del ref_output, ref_logits, ref_all_logprob
                     torch.cuda.empty_cache()
-                    # use target_response_seq as input to reward model
+
+
+                    ## ADVPROMPTER
+                    # # extracting response logit only since query_response=[input+response]
+                    # TODO: output padding is shifted to right, so may need to modify this to extract response logit
+                    # query_length_before_pad =first_true_indices(query == processing_class.pad_token_id) - 1
+                    # ref_logits = ref_output.logits[:, query_length_before_pad] # (B,response_length,emb_dim)
+                    # ref_logits /= args.temperature + 1e-7
+                    # ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
+                    # # extract logprob corresponding to response token , i.e. pi_ref(a|s)
+                    # ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
+                    # del ref_output, ref_logits, ref_all_logprob
+                    # torch.cuda.empty_cache()
+
+
+                    
                     # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
-                    postprocessed_response = response # (B,response_length)
+                    postprocessed_response = response # suffix
                     
                     if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
                             args.stop_token_id, processing_class.pad_token_id, response
                         )
-
+                    # ORIGINAL
                     # Response Processing 2. run reward model on the truncated responses
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1) # (B, query_len+ response_len)
                     sequence_length = first_true_indices(postprocessed_response == processing_class.pad_token_id) - 1 # response_len - 1
@@ -553,10 +588,26 @@ class PPOTrainer(Trainer):
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, processing_class.pad_token_id, context_length
                     ) # (B,logit_shape)
+                    # extracting response logit only
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
                     _, score, _ = get_reward(
                         reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
                     ) # (B,logit_shape)
+
+                    # # ADVPROMPTER
+                    # #TODO: Check get_reward model implementation
+                    # # Response Processing 2. run reward model on the truncated responses
+                    # unwrapped_value_model = accelerator.unwrap_model(model).value_model
+                    # # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
+                    # value, _, _ = get_reward(
+                    #     unwrapped_value_model, target_response_seq.ids, processing_class.pad_token_id, context_length
+                    # ) # (B,logit_shape)
+                    # _, score, _ = get_reward(
+                    #     reward_model, target_response_seq.ids, processing_class.pad_token_id, context_length
+                    # ) # (B,logit_shape)
+
+
+
 
                     responses.append(response)
                     postprocessed_responses.append(postprocessed_response)
@@ -598,6 +649,7 @@ class PPOTrainer(Trainer):
                 rewards = non_score_reward.clone()
                 actual_start = torch.arange(rewards.size(0), device=rewards.device)
                 actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
+                # adding reward on init token and end token to avoid sparse reward
                 rewards[[actual_start, actual_end]] += scores
 
                 # 5. whiten rewards

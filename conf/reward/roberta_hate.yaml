@@ -1,0 +1,17 @@
+defaults:
+  - base_reward
+  - _self_
+
+llm_params:
+  model_name: "roberta-hate-speech"
+  checkpoint: 'facebook/roberta-hate-speech-dynabench-r4-target'
+  classification: true
+  
+prompt_manager:
+  prompt_template: 
+    - key: system_message
+      msg: "<s>"
+    - key: hyper_instruct
+      msg: "{instruct}"  # loaded from context
+    - key: suffix
+      msg: "{suffix}"  # loaded from context

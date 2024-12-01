@@ -7,6 +7,7 @@ import csv
 import json
 from functools import wraps
 from tqdm import tqdm
+from huggingface_hub import snapshot_download
 
 import wandb
 import numpy as np
@@ -24,8 +25,12 @@ from transformers import (
     GPTNeoXForCausalLM,
     LlamaForCausalLM,
     MistralForCausalLM,
+    AutoModelForSequenceClassification,
+    BitsAndBytesConfig
 )
 import pdb
+from accelerate import load_checkpoint_and_dispatch,init_empty_weights
+
 
 def hit_rate_at_n(jb_stat, n):
     jb_sum_at_n = np.sum(jb_stat[:, :n], axis=1)
@@ -432,7 +437,8 @@ def read_csv_file(filename):
     return entries
 
 
-def llm_loader(llm_params, device, verbose=False):
+def llm_loader(llm_params, verbose=False):
+    device = llm_params.device
     tqdm.write(
         f" Loading model: {llm_params.model_name} from {llm_params.checkpoint}...",
     )
@@ -460,30 +466,66 @@ def llm_loader(llm_params, device, verbose=False):
             use_fast=use_fast,
             legacy=False,
         )
-
-        
-        model = AutoModelForCausalLM.from_pretrained(
+        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+        if llm_params.classification:
+            model = AutoModelForSequenceClassification.from_pretrained(
                 llm_params.checkpoint,
-                # low_cpu_mem_usage=True,
                 torch_dtype=dtype,
-            ).to(device)
-        # if we use ppo and llm is prompter we wrap with value head
-        # if llm_params.ppo and llm_params.prompter:
-        #     lora_config_dct = dict(llm_params.lora_params.lora_config)
-        #     lora_config_dct["target_modules"] = [
-        #         m for m in llm_params.lora_params.lora_config["target_modules"]
-        #     ]
-        #     lora_config = LoraConfig(**lora_config_dct)
-        #     model = AutoModelForCausalLMWithValueHead(
-        #     model,
-        #     low_cpu_mem_usage=True,
-        #     torch_dtype=dtype,
-        #     device_map=llm_params.device,
-        #     peft_config = lora_config 
-        #     )
-            
+                quantization_config = quantization_config
+            )
+            embedding_matrix = None
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                    llm_params.checkpoint,
+                    low_cpu_mem_usage=True,
+                    torch_dtype=dtype,
+                    quantization_config = quantization_config
+                )
+            embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
+  
         
             
+    mem_after = get_total_allocated_memory()
+
+    if verbose:
+        tqdm.write(f" Loaded model: {model}")
+    tqdm.write(
+        f" Mem usage model: {mem_after - mem_before:.2f} GB | Total Mem usage: {get_total_allocated_memory():.2f} GB",
+    )
+
+    
+
+    if llm_params.freeze:
+        tqdm.write(" Freezing model...")
+        for k, v in model.named_parameters():
+            v.requires_grad = False
+            
+    
+    if llm_params.lora_params is not None:
+        if llm_params.lora_params.warmstart:
+            tqdm.write(
+                f" Loading LoRA checkpoint: {llm_params.lora_params.lora_checkpoint}",
+            )
+            model = PeftModel.from_pretrained(
+                model,
+                llm_params.lora_params.lora_checkpoint,
+                is_trainable=not llm_params.freeze,
+            )
+        else:
+            tqdm.write(" Transforming to LoRA model...")
+            lora_config_dct = dict(llm_params.lora_params.lora_config)
+            lora_config_dct["target_modules"] = [
+                m for m in llm_params.lora_params.lora_config["target_modules"]
+            ]
+            lora_config = LoraConfig(**lora_config_dct)
+            model = get_peft_model(model, lora_config)
+  
+    # print_trainable_parameters(model)
+    return model, tokenizer, embedding_matrix
+
+    
+
+
     mem_after = get_total_allocated_memory()
 
     if verbose:

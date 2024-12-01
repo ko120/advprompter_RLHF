@@ -21,4 +21,4 @@ rich
 datasets
 accelerate
 deepspeed
-
+bitsandbytes

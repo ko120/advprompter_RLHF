@@ -3,6 +3,8 @@ llm_params:
   freeze: true
   dtype: float16
   lora_params: null
+  classification: false
+  accelerator: true
 allow_non_ascii: true
 gen_params:
   max_new_tokens: 150

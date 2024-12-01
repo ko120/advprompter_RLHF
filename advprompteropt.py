@@ -386,6 +386,7 @@ def evaluate_prompt(
     basemodel_tf = None
     if suffix is not None and not suffix.is_empty:
         # compute fleuncy term of loss
+        # we disabled lora adaptor sicnce we don't want to affect lora params during eval
         basemodel_tf = prompter.compute_pred_loss_teacher_forced(
             key="suffix",
             instruct=instruct,

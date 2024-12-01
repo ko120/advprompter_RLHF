@@ -3,16 +3,20 @@ defaults:
   - _self_
 
 mode: train
-# prompter: 
+
+prompter: 
+  llm_params:
+    accelerator: true
+target_llm:
+  llm_params:
+    accelerator: true
+# reward:
 #   llm_params:
-#     # set it true for ppo
-#     # ppo: true
-#     # prompter: true
-# target_llm:
+#     accelerator: true
+# value:
 #   llm_params:
-#     # set it true for ppo
-#     # ppo: false
-#     # prompter: false
+#     accelerator: true
+
 
 
 pretrain:
@@ -37,7 +41,7 @@ train:
   replay_buffer:
     num_updates: 8
     size: 256
-    priority_alpha: 1.5
+    priority_alpha:  1.5
     # priority = priority_factor.loss_delta * relu(loss_delta) + priority_factor.jailbreaking * jailbreaking
     priority_factor:  # note: zero priority are not added to buffer
       loss_delta: 1.0
@@ -48,7 +52,7 @@ train:
     max_new_tokens: 30
     num_beams: 4
     repetition_penalty: 1.2
-    top_k: 48 # try to reduce this or increase num_chunks if doesn't fit to memory
+    top_k: 24 # try to reduce this or increase num_chunks if doesn't fit to memory
     num_chunks: 1  # process top_k iteratively in chunks, helps reduce memory, should divide top_k
     lambda_val: 100  # w2 in AutoDAN paper, controls perplexity vs loss tradeoff (50-100 is good)
     candidates:
@@ -66,15 +70,17 @@ train:
     config:
       output_dir: "${output_dir}/"
       learning_rate: 5e-5
-      gamma: 0.95
+      gamma: 1
       lam: 0.95
       mini_batch_size: 2
+      kl_coef: 0.001
+      vf_coef: 1
       gradient_accumulation_steps: 2
       missing_eos_penalty: True
     gen_params:
       do_sample: true
-      temperature: 0.6
-      top_p: 0.9
+      temperature: 0.7
+      top_p: 0.92
       max_new_tokens: 30
 
   # trl=0.11.4

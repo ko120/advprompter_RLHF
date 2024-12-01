@@ -1,8 +1,9 @@
 llm_params:
-  device: 'cuda:0'
-  freeze: false
+  device: 'cuda:3'
+  freeze: true
   dtype: float16
-  classification: false
+  lora_params: null
+  classification: true
   accelerator: true
 allow_non_ascii: false
 gen_params:

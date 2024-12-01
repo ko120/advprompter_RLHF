@@ -1,0 +1,17 @@
+defaults:
+  - base_reward
+  - _self_
+
+llm_params:
+  model_name: "harm_bench_Llama2"
+  checkpoint: 'cais/HarmBench-Llama-2-13b-cls'
+  classification: false 
+
+prompt_manager:
+  prompt_template: 
+    - key: system_message
+      msg: "<s>"
+    - key: hyper_instruct
+      msg: "{instruct}"  # loaded from context
+    - key: suffix
+      msg: "{suffix}"  # loaded from context

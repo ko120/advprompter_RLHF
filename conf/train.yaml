@@ -4,6 +4,13 @@ defaults:
 
 mode: train
 
+prompter: 
+  llm_params:
+    accelerator: true
+target_llm:
+  llm_params:
+    accelerator: true
+    
 pretrain:
   enable: false
   epochs: 20

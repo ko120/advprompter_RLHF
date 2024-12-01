@@ -32,7 +32,7 @@ class LLM(nn.Module):
         self.device = self.params.llm_params.device
 
         self.model, self.tokenizer, self.embedding_matrix = llm_loader(
-            llm_params=params.llm_params, device= self.device, verbose=verbose
+            llm_params=params.llm_params, verbose=verbose
         )
         if self.tokenizer.pad_token is None:
             if self.tokenizer.unk_token is not None:
@@ -57,7 +57,7 @@ class LLM(nn.Module):
         # reorder such that all masked tokens are on the left
         mask = query_seq.mask
         sorted_mask, indices = torch.sort(mask.long(), dim=1, stable=True)
-
+        # when using base model disable lora adaptor
         with self.model.disable_adapter() if use_basemodel else nullcontext():
             if query_seq.is_hard: # discrete token
                 ids = query_seq.ids
@@ -148,12 +148,13 @@ class LLM(nn.Module):
         query_seq, response_teacher_seq = self.prepare_prompt(
             context, up_to_key=key, return_key_seq=True
         )
+        pdb.set_trace()
         assert not response_teacher_seq.is_empty
         full_query_seq = MergedSeq([query_seq, response_teacher_seq])
         if detach_query:
             full_query_seq = full_query_seq.clone().detach()
 
-        # predicting next sequence using instruct + target sequence
+        # forward pass to obtain logits
         pred_full_query_seq = self.model_forward(
             query_seq=full_query_seq, use_basemodel=use_basemodel
         )

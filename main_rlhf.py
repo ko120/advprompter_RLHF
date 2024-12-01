@@ -39,12 +39,14 @@ from utils import (
     read_csv_file,
     hit_rate_at_n,
     AdvPromptDataset,
+    llm_loader,
 )
 from custom_trl.trl.trainer import PPOConfig, PPOTrainer
 
 from transformers import (
     AutoModelForCausalLM,
-    AutoModelForSequenceClassification)
+    AutoModelForSequenceClassification,
+    BitsAndBytesConfig)
 from advprompteropt import advPrompterOpt, evaluate_prompt
 import pdb
 from copy import deepcopy
@@ -61,10 +63,6 @@ class Workspace:
         self.enable_wandb = cfg.wandb_params.enable_wandb
         self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
-        # if self.enable_accelerator:
-        #     self.accelerator = Accelerator(gradient_accumulation_steps=self.cfg.train.ppo_params.config.gradient_accumulation_steps)
-        # else:
-        #     self.accelerator = None
 
         if self.enable_wandb:
             self.init_wandb()
@@ -72,16 +70,22 @@ class Workspace:
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
-        self.reward_llm = AutoModelForSequenceClassification.from_pretrained(
-        "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
-        self.value_llm = AutoModelForSequenceClassification.from_pretrained(
-        "facebook/roberta-hate-speech-dynabench-r4-target", trust_remote_code=True)
+        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+
+        # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target",
+        #                                                                      torch_dtype=torch.float16
+        #                                                                      ,quantization_config= quantization_config)
+        # self.value_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target", 
+        #                                                                     torch_dtype=torch.float16
+        #                                                                     ,quantization_config=quantization_config)
+        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
+                                                                    
+        self.value_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
         )
 
-        
        
         
         self.train_loader = get_dataloader(
@@ -109,8 +113,8 @@ class Workspace:
             value_model = self.value_llm,
             reward_model=self.reward_llm,
             target_llm = self.target_llm,
-            train_loader= self.train_loader,
-        )
+            train_loader= self.train_loader
+            )
         self.ppo_trainer.train()
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)

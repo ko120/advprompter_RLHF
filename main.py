@@ -51,18 +51,15 @@ class Workspace:
         self.enable_wandb = cfg.wandb_params.enable_wandb
         self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
-        if self.enable_accelerator:
-            self.accelerator = Accelerator()
-        else:
-            self.accelerator = None
+        
 
         if self.enable_wandb:
             self.init_wandb()
 
         tqdm.write("Initializing Prompter...")
-        self.prompter = LLM(cfg.prompter, self.accelerator, verbose=self.verbose)
+        self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
-        self.target_llm = LLM(cfg.target_llm, self.accelerator, verbose=self.verbose)
+        self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
@@ -423,6 +420,7 @@ class Workspace:
 
     def finetune_prompter_step(self, instruct, suffix):
         self.prompter_optimizer.zero_grad()
+        # we set use_basemodel=false during finetuning since we want to train lora params
         prompter_tf_opt = self.prompter.compute_pred_loss_teacher_forced(
             key="suffix",
             instruct=instruct,
