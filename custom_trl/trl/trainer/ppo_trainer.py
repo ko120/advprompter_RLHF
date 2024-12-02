@@ -522,7 +522,8 @@ class PPOTrainer(Trainer):
                     logits = logitss[i : i + args.local_rollout_forward_batch_size] 
                     all_logprob = F.log_softmax(logits, dim=-1)
                     # extracting only response logit
-                    logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) 
+
+                    logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B, response_len)
                     del logits, all_logprob
                     torch.cuda.empty_cache()
 
@@ -587,12 +588,12 @@ class PPOTrainer(Trainer):
                     # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, processing_class.pad_token_id, context_length
-                    ) # (B,logit_shape)
+                    ) # (B, query+response len, 1)
                     # extracting response logit only
-                    value = full_value[:, context_length - 1 : -1].squeeze(-1)
+                    value = full_value[:, context_length - 1 : -1].squeeze(-1) #(B, response_len)
                     _, score, _ = get_reward(
                         reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
-                    ) # (B,logit_shape)
+                    ) # (B)
 
                     # # ADVPROMPTER
                     # #TODO: Check get_reward model implementation
@@ -601,10 +602,11 @@ class PPOTrainer(Trainer):
                     # # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
                     # value, _, _ = get_reward(
                     #     unwrapped_value_model, target_response_seq.ids, processing_class.pad_token_id, context_length
-                    # ) # (B,logit_shape)
+                    # ) # (B, query+response len, 1)
+                    # value = full_value[:, context_length - 1 : -1].squeeze(-1) #(B, response_len)
                     # _, score, _ = get_reward(
                     #     reward_model, target_response_seq.ids, processing_class.pad_token_id, context_length
-                    # ) # (B,logit_shape)
+                    # ) # (B) 
 
 
 
@@ -635,8 +637,8 @@ class PPOTrainer(Trainer):
                 # accelerator.print(f"{scores=}, {(contain_eos_token.sum() / len(contain_eos_token))=}")
 
                 # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
-                response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1)
-                padding_mask = response_idxs > sequence_lengths.unsqueeze(1)
+                response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1) # (B, response_len)
+                padding_mask = response_idxs > sequence_lengths.unsqueeze(1) # appending padding when idx > response len
                 logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
                 ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
                 sequence_lengths_p1 = sequence_lengths + 1
@@ -646,12 +648,11 @@ class PPOTrainer(Trainer):
                 # 4. compute rewards
                 kl = logprobs - ref_logprobs
                 non_score_reward = -args.kl_coef * kl
-                rewards = non_score_reward.clone()
-                actual_start = torch.arange(rewards.size(0), device=rewards.device)
-                actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
+                rewards = non_score_reward.clone() # (B,response_len)
+                actual_start = torch.arange(rewards.size(0), device=rewards.device) # tensor([0, 1, 2, 3, 4, 5, 6, 7], device='cuda:0')
+                actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths) # tensor([29, 29, 29, 29, 29, 29, 29, 29], device='cuda:0')
                 # adding reward on init token and end token to avoid sparse reward
                 rewards[[actual_start, actual_end]] += scores
-
                 # 5. whiten rewards
                 if args.whiten_rewards:
                     rewards = masked_whiten(rewards, mask=~padding_mask_p1, shift_mean=False)

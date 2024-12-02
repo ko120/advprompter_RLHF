@@ -18,6 +18,7 @@ from utils import (
     llm_loader,
     loss_seqs,
 )
+from custom_trl.trl.trainer.model_config import ModelConfig
 # used for PPO
 SIMPLE_CHAT_TEMPLATE = "{% for message in messages %}{{message['role'].capitalize() + ': ' + message['content'] + '\n\n'}}{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
 
@@ -30,7 +31,6 @@ class LLM(nn.Module):
 
        
         self.device = self.params.llm_params.device
-
         self.model, self.tokenizer, self.embedding_matrix = llm_loader(
             llm_params=params.llm_params, verbose=verbose
         )

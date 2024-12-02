@@ -5,7 +5,12 @@ defaults:
 llm_params:
   model_name: "tiny_llama"
   checkpoint: 'TinyLlama/TinyLlama-1.1B-step-50K-105b'
-  lora_params:
+  quantization:
+    type: "load_in_4bit"
+    bnb_4bit_quant_type: "nf4"
+    use_bnb_nested_quant: false
+
+  lora_params: 
     warmstart: false
     lora_checkpoint: null
     lora_config:
@@ -17,6 +22,7 @@ llm_params:
         - v_proj
         - lm_head
       task_type: "CAUSAL_LM"
+  
 prompt_manager:
   prompt_template: 
     - key: system_message

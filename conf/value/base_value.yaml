@@ -4,6 +4,8 @@ llm_params:
   dtype: float16
   classification: true
   accelerator: true
+  quantization: 
+    type: None
 allow_non_ascii: false
 gen_params:
   do_sample: true

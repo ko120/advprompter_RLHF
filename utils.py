@@ -30,6 +30,7 @@ from transformers import (
 )
 import pdb
 from accelerate import load_checkpoint_and_dispatch,init_empty_weights
+from custom_trl.trl.trainer.utils import get_quantization_config
 
 
 def hit_rate_at_n(jb_stat, n):
@@ -466,7 +467,21 @@ def llm_loader(llm_params, verbose=False):
             use_fast=use_fast,
             legacy=False,
         )
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+        # quantization
+        if llm_params.quantization.type == "load_in_4bit":
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=dtype,  # For consistency with model weights, we use the same value as `torch_dtype`
+                bnb_4bit_quant_type=llm_params.quantization.bnb_4bit_quant_type,
+                bnb_4bit_use_double_quant=llm_params.quantization.use_bnb_nested_quant,
+                bnb_4bit_quant_storage=dtype,
+            )
+        elif llm_params.quantization.type  == "load_in_8bit":
+            quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,)
+        else:
+            quantization_config = None
+            
         if llm_params.classification:
             model = AutoModelForSequenceClassification.from_pretrained(
                 llm_params.checkpoint,

@@ -6,6 +6,10 @@ llm_params:
   model_name: "roberta-hate-speech"
   checkpoint: 'facebook/roberta-hate-speech-dynabench-r4-target'
   classification: true
+  quantization:
+    type: "load_in_4bit"
+    bnb_4bit_quant_type: "nf4"
+    use_bnb_nested_quant: false
   lora_params:
     warmstart: false
     lora_checkpoint: null

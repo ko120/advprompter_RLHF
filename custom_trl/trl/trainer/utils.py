@@ -1105,13 +1105,12 @@ def get_reward(
     """
     
     attention_mask = query_responses != pad_token_id
-    pdb.set_trace()
     position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
     lm_backbone = getattr(model, model.base_model_prefix)
     # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
-    
-    output = model(
+    pdb.set_trace()
+    output = lm_backbone(
         input_ids=input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -1119,8 +1118,10 @@ def get_reward(
         output_hidden_states=True,
         use_cache=False,  # otherwise mistral-based RM would error out
     )
-    pdb.set_trace()
-    reward_logits = model.score(output.hidden_states[-1])
+    model.classifier = nn.Linear(in_features=2048, out_features=1, bias=False)
+
+    # reward_logits = model.score(output.hidden_states[-1]) # (B,seq_len, 1)
+    reward_logits = model.classifier(output.hidden_states[-1]) # (B,seq_len, 1)
    
     sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
 

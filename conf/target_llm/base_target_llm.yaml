@@ -5,6 +5,8 @@ llm_params:
   lora_params: null
   classification: false
   accelerator: true
+  quantization: 
+    type: None
 allow_non_ascii: true
 gen_params:
   max_new_tokens: 150

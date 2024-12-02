@@ -76,7 +76,7 @@ train:
       kl_coef: 0.001
       vf_coef: 1
       gradient_accumulation_steps: 2
-      missing_eos_penalty: True
+      missing_eos_penalty: 1.0
     gen_params:
       do_sample: true
       temperature: 0.7

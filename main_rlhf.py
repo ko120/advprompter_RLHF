@@ -46,7 +46,8 @@ from custom_trl.trl.trainer import PPOConfig, PPOTrainer
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
-    BitsAndBytesConfig)
+    BitsAndBytesConfig,
+    AutoConfig)
 from advprompteropt import advPrompterOpt, evaluate_prompt
 import pdb
 from copy import deepcopy
@@ -70,17 +71,33 @@ class Workspace:
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+        quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,  # For consistency with model weights, we use the same value as `torch_dtype`
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant= False,
+                bnb_4bit_quant_storage=torch.float16,
+            )
 
-        # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target",
-        #                                                                      torch_dtype=torch.float16
-        #                                                                      ,quantization_config= quantization_config)
-        # self.value_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target", 
-        #                                                                     torch_dtype=torch.float16
-        #                                                                     ,quantization_config=quantization_config)
-        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
+        
+     
+        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target",
+                                                                             torch_dtype=torch.float16
+                                                                             ,quantization_config= quantization_config
+                                                                     
+                                                                             )
+        
+        self.value_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target", 
+                                                                            torch_dtype=torch.float16
+                                                                            ,quantization_config=quantization_config
+                                                                            , config = config
+                                                                         
+                                                                            )
+                                                  
+
+        # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
                                                                     
-        self.value_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
+        # self.value_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
