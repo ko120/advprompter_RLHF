@@ -75,25 +75,26 @@ class Workspace:
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,  # For consistency with model weights, we use the same value as `torch_dtype`
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant= False,
+                bnb_4bit_use_double_quant= True,
                 bnb_4bit_quant_storage=torch.float16,
             )
 
         
-     
-        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target",
-                                                                             torch_dtype=torch.float16
-                                                                             ,quantization_config= quantization_config
-                                                                     
-                                                                             )
         
-        self.value_llm = AutoModelForSequenceClassification.from_pretrained("facebook/roberta-hate-speech-dynabench-r4-target", 
-                                                                            torch_dtype=torch.float16
-                                                                            ,quantization_config=quantization_config
-                                                                            , config = config
-                                                                         
-                                                                            )
-                                                  
+        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
+                                                                             torch_dtype=torch.float16,num_labels=1,
+                                                                             quantization_config= quantization_config)
+        self.reward_llm.config.quantization_config = quantization_config
+        self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
+                                                                             torch_dtype=torch.float16,num_labels=1,
+                                                                             quantization_config = quantization_config)
+        self.value_llm.config.quantization_config = quantization_config
+        lora_config_dct = dict(self.cfg.value.llm_params.lora_params.lora_config)
+        lora_config_dct["target_modules"] = [
+            m for m in self.cfg.value.llm_params.lora_params.lora_config["target_modules"]
+        ]
+        lora_config = LoraConfig(**lora_config_dct)
+        self.value_llm  = get_peft_model(self.value_llm , lora_config)
 
         # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
                                                                     

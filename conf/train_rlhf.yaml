@@ -1,4 +1,6 @@
 defaults:
+  - value: harm_bench
+  - reward: harm_bench
   - eval
   - _self_
 

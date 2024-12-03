@@ -644,7 +644,6 @@ class PPOTrainer(Trainer):
                 sequence_lengths_p1 = sequence_lengths + 1
                 padding_mask_p1 = response_idxs > (sequence_lengths_p1.unsqueeze(1))
                 values = torch.masked_fill(values, padding_mask_p1, 0)
-
                 # 4. compute rewards
                 kl = logprobs - ref_logprobs
                 non_score_reward = -args.kl_coef * kl

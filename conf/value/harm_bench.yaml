@@ -14,7 +14,7 @@ llm_params:
       lora_alpha: 16
       bias: "none"
       target_modules:
-        - lm_head
+        - score
       task_type: "SEQ_CLS"
 prompt_manager:
   prompt_template: 

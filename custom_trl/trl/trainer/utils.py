@@ -47,6 +47,7 @@ from transformers.utils import (
     is_torch_npu_available,
     is_torch_xpu_available,
 )
+from peft import LoraModel
 
 from ..import_utils import is_unsloth_available
 from ..trainer.model_config import ModelConfig
@@ -1106,7 +1107,13 @@ def get_reward(
     
     attention_mask = query_responses != pad_token_id
     position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
-    lm_backbone = getattr(model, model.base_model_prefix)
+    if isinstance(model.base_model, LoraModel):
+        # if Lora model, we need to take one more step to extract backbone
+        lm_backbone = getattr(model, model.base_model_prefix)
+        lm_backbone = getattr(lm_backbone, lm_backbone.base_model_prefix)
+    else:
+        lm_backbone = getattr(model, model.base_model_prefix)
+
     # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
     pdb.set_trace()
@@ -1118,10 +1125,8 @@ def get_reward(
         output_hidden_states=True,
         use_cache=False,  # otherwise mistral-based RM would error out
     )
-    model.classifier = nn.Linear(in_features=2048, out_features=1, bias=False)
 
-    # reward_logits = model.score(output.hidden_states[-1]) # (B,seq_len, 1)
-    reward_logits = model.classifier(output.hidden_states[-1]) # (B,seq_len, 1)
+    reward_logits = model.score(output.hidden_states[-1]) # (B,seq_len, 1)
    
     sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
 
