@@ -80,15 +80,15 @@ class Workspace:
             )
 
         
-        
+        # if using RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits model is quantized on 32 bit, so input should be 32 bit 
         self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
                                                                              torch_dtype=torch.float16,num_labels=1,
-                                                                             quantization_config= quantization_config)
-        self.reward_llm.config.quantization_config = quantization_config
+                                                                            #  quantization_config= quantization_config,
+                                                                             )
         self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
                                                                              torch_dtype=torch.float16,num_labels=1,
-                                                                             quantization_config = quantization_config)
-        self.value_llm.config.quantization_config = quantization_config
+                                                                             quantization_config = quantization_config,
+                                                                             )
         lora_config_dct = dict(self.cfg.value.llm_params.lora_params.lora_config)
         lora_config_dct["target_modules"] = [
             m for m in self.cfg.value.llm_params.lora_params.lora_config["target_modules"]

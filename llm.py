@@ -117,6 +117,7 @@ class LLM(nn.Module):
 
     @autocast_decorator
     def compute_pred_loss_teacher_forced(self, loss_params, label=None, **kwargs):
+        # returns response seq with logits
         gen_seqs = self.generate_teacher_forced(**kwargs)
         if label is None:
             label = gen_seqs.response_teacher
@@ -148,7 +149,6 @@ class LLM(nn.Module):
         query_seq, response_teacher_seq = self.prepare_prompt(
             context, up_to_key=key, return_key_seq=True
         )
-        pdb.set_trace()
         assert not response_teacher_seq.is_empty
         full_query_seq = MergedSeq([query_seq, response_teacher_seq])
         if detach_query:
@@ -240,13 +240,15 @@ class LLM(nn.Module):
 
     def prepare_prompt(self, context, up_to_key=None, return_key_seq=False):
         """
+        # prepare prmopt with system prompt appended
         return seq until up_to_key, ex. if up_to_key=suffix, it returns before suffix prompt
         when return_key_seq = True, it both returns input and response prompts
         """
         seqs = []
         for msg_dct in self.params.prompt_manager.prompt_template:
             # self.params.prompt_manager.prompt_template: 
-            # [{'key': 'system_message', 'msg': '<s>'}, {'key': 'hyper_instruct', 'msg': '{instruct}'}, {'key': 'suffix', 'msg': '{suffix}'}]
+            # prompter:[{'key': 'system_message', 'msg': '<s>'}, {'key': 'hyper_instruct', 'msg': '{instruct}'}, {'key': 'suffix', 'msg': '{suffix}'}]
+            # target llm : [{'key': 'system_message', 'msg': '<s>[INST]'}, {'key': 'full_instruct', 'msg': '{full_instruct}'}, {'key': 'separator', 'msg': '[/INST]'}, {'key': 'target', 'msg': '{target}'}]
             if (
                 up_to_key is not None
                 and up_to_key == msg_dct.key

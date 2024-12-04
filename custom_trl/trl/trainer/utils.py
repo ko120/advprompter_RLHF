@@ -1116,7 +1116,6 @@ def get_reward(
 
     # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
-    pdb.set_trace()
     output = lm_backbone(
         input_ids=input_ids,
         attention_mask=attention_mask,
