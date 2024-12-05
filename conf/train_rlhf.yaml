@@ -74,11 +74,16 @@ train:
       learning_rate: 5e-5
       gamma: 1
       lam: 0.95
-      mini_batch_size: 2
       kl_coef: 0.001
       vf_coef: 1
-      gradient_accumulation_steps: 2
+      # gradient_accumulation_steps: 2
       missing_eos_penalty: 1.0
+      # for deep speed
+      num_ppo_epochs: 1
+      num_mini_batches: 1
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 8
+      local_rollout_forward_batch_size: 1
     gen_params:
       do_sample: true
       temperature: 0.7

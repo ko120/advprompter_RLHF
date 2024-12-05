@@ -73,20 +73,20 @@ class Workspace:
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
         quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,  # For consistency with model weights, we use the same value as `torch_dtype`
+                bnb_4bit_compute_dtype=torch.bfloat16,  # For consistency with model weights, we use the same value as `torch_dtype`
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant= True,
-                bnb_4bit_quant_storage=torch.float16,
+                bnb_4bit_quant_storage=torch.bfloat16, # we need to use bfloat16 instead of float16 for better numeric stability
             )
 
         
         # if using RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits model is quantized on 32 bit, so input should be 32 bit 
-        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
-                                                                             torch_dtype=torch.float16,num_labels=1,
-                                                                            #  quantization_config= quantization_config,
+        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
+                                                                             torch_dtype=torch.bfloat16,num_labels=1,
+                                                                                quantization_config= quantization_config,
                                                                              )
-        self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits", 
-                                                                             torch_dtype=torch.float16,num_labels=1,
+        self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
+                                                                             torch_dtype=torch.bfloat16,num_labels=1,
                                                                              quantization_config = quantization_config,
                                                                              )
         lora_config_dct = dict(self.cfg.value.llm_params.lora_params.lora_config)
@@ -112,16 +112,22 @@ class Workspace:
             augment_target=self.cfg.train.augment_target,
             batch_size=self.cfg.train.batch_size,
         )
+   
+        self.eval_loader = get_dataloader(
+            data_pth="/home/brianko/advprompter_RLHF/data/harmful_behaviors/dataset/validation.csv",
+            shuffle=False,
+            augment_target=True,
+            batch_size=self.cfg.eval.batch_size,
+        )
         
-        self.total_train_steps = self.cfg.train.epochs * self.train_loader.effective_dataset_size
+        # self.total_train_steps = self.cfg.train.epochs * self.train_loader.effective_dataset_size
         ppo_config_kwargs = dict(self.cfg.train.ppo_params.config)
         
         # trl==0.12.1
         self.ppo_config = PPOConfig(
-            num_ppo_epochs = self.total_train_steps,
+            # num_ppo_epochs = self.total_train_steps,
             **ppo_config_kwargs
         )
-
         self.ppo_trainer = PPOTrainer(
             args=self.ppo_config,
             cfg= self.cfg,
@@ -131,9 +137,10 @@ class Workspace:
             value_model = self.value_llm,
             reward_model=self.reward_llm,
             target_llm = self.target_llm,
-            train_loader= self.train_loader
+            train_loader= self.train_loader,
+            eval_loader = self.eval_loader,
             )
-        self.ppo_trainer.train()
+        
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)
 
@@ -215,263 +222,13 @@ class Workspace:
         )
 
     def train(self):
-        self.prompter_optimizer = torch.optim.Adam(
-            self.prompter.parameters(), **self.cfg.train.prompter_optim_params
-        )
-        sampler = PrioritizedSampler(
-            max_capacity=self.cfg.train.replay_buffer.size,
-            alpha=self.cfg.train.replay_buffer.priority_alpha,
-            beta=1.0,
-        )
-        self.replay_buffer = ReplayBuffer(
-            storage=ListStorage(self.cfg.train.replay_buffer.size),
-            batch_size=self.cfg.train.batch_size,
-            sampler=sampler,
-            collate_fn=collate_fn,
-        )
-
-        if self.cfg.train.do_initial_eval:
-            self.eval()
-        if self.cfg.pretrain.enable:
-            self.pretrain()
-            if self.cfg.train.model_save_dir is not None:
-                self.save_prompter()
-
-        tqdm.write("Starting training...")
-        pbar = tqdm(range(self.cfg.train.epochs))
-        pbar.set_description("Training (epochs)")
-        for self.epoch in pbar:
-            self.train_epoch()
-            if (
-                self.cfg.train.eval_every is not None
-                and (self.epoch + 1) % self.cfg.train.eval_every == 0
-                and (self.epoch + 1) < self.cfg.train.epochs
-            ):
-                if self.cfg.train.model_save_dir is not None:
-                    self.save_prompter()
-                self.eval()
+        self.ppo_trainer.train()
 
         if self.cfg.train.model_save_dir is not None:
             self.save_prompter()
         self.eval()
 
-    def train_epoch(self):
-        self.prompter.train()
-        self.target_llm.eval()
-        train_metrics = Metrics(prefix="train/")
-        
-        data = []
-
-        # initialize loaders
-        # train_loader = get_dataloader(
-        #     data_pth=self.cfg.train.dataset_pth,
-        #     shuffle=True,
-        #     augment_target=self.cfg.train.augment_target,
-        #     batch_size=self.cfg.train.batch_size,
-        # )
-       
-        # trl==0.11.4
-        # self.ppo_config = PPOConfig(
-        #     model_name=self.cfg.prompter.llm_params.model_name,
-        #     log_with="wandb" if self.enable_wandb else None,
-        #     batch_size=self.cfg.train.batch_size,
-        #     optimize_cuda_cache=True,
-        #     seed=self.cfg.seed,
-        #     steps=self.total_train_steps,
-        #     **ppo_config_kwargs
-        # )
-        # self.ppo_trainer = PPOTrainer(
-        #     self.ppo_config,
-        #     self.prompter.model,
-        #     ref_model=None,
-        #     tokenizer=self.prompter.tokenizer,
-        # )
-
-
-
-
-        pbar_batches = tqdm(self.train_loader)
-        pbar_batches.set_description(f"Training epoch {self.epoch}")
-        for batch_idx, batch in enumerate(pbar_batches):
-            context = self.batch_to_context(batch)
-            instruct = context.instruct
-            target = context.target
-            log_sequences = (
-                batch_idx % self.cfg.wandb_params.log_sequences_every.train == 0
-            )
-            with torch.no_grad():
-
-                # ------- Rollout -----------
-
-                prompter_ar = self.prompter.generate_autoregressive(
-                    key="suffix",
-                    max_new_tokens=self.cfg.train.q_params.max_new_tokens,
-                    instruct=instruct,
-                    use_basemodel = True
-                )
-                suffix = prompter_ar.response_sample
-                
-                                
-                # combine instruct and initial suffix to form initial full instruct
-                # padding moved all the way to right 
-                # #tensor([12037,   263,  4933,   393,   508,   367,  1304,   304, 15833,   964,
-                #     2305, 29915, 29879, 27656,   322,  6597,  2472, 29889,  2398, 29892,
-                #     591,   505,   694,  2969,  3692,   445,   338,   825,   278,  5434,
-                #     310, 15833,   292,   674,   367,   763, 29889,  1334,   526,   451,
-                #     297,   263,  2602,   304,   367,  2221,   304,     0,     0,     0,
-                #         0,     0,     0,     0,     0,     0,     0]
-                # while query_response (original ppo implementatation)
-                #(Pdb) query_responses[0]
-                # tensor([12037,   263,  4933,   393,   508,   367,  1304,   304, 15833,   964,
-                #          2305, 29915, 29879, 27656,   322,  6597,  2472,     0,     0,     0,
-                #             0,     0,     0,     0,     0,     0,     0, 29889,    13,  1576,
-                #         15483,   338,  1641,  8906,   491,   278,  3014,   310,   951,   293,
-                #          4156,   297, 24771,   411,   278,  3014,   310,  2296,   600,   969,
-                #         29889,    13,  1576,  4933,   338,   263,  6601], device='cuda:0')
-                full_instruct_text = (
-                    MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text
-                )
-                
-                full_instruct = Seq(
-                    text=full_instruct_text,
-                    tokenizer=self.target_llm.tokenizer,
-                    device=self.target_llm.device,
-                )
-               
-
-                # verify that self.prompter.generate_autoregressive == self.ppo_trainer.generate
-                # with torch.no_grad():
-                #     prompter_ar = self.prompter.generate_autoregressive(key='suffix', context=context, max_new_tokens=self.suffix_length)
-                #     context.suffix = prompter_ar.response_sample
-                # print("!!!!!! context.suffix.ids")
-                # pprint(context.suffix.ids)
-                # print("!!!!!! ppo_trainer.generate")
-                # pprint(prompter_responses)
-                # ----------------------------
-
-
-
-
-            #     # combine instruct and initial suffix to form initial full instruct
-            #     full_instruct_text = (
-            #         MergedSeq(seqs=[instruct, suffix]).to_seq(merge_dtype="ids").text
-            #     )
-            #     full_instruct = Seq(
-            #         text=full_instruct_text,
-            #         tokenizer=self.target_llm.tokenizer,
-            #         device=self.target_llm.device,
-            #     )
-
-            #     # evaluate initial suffix
-            #     if self.verbose:
-            #         tqdm.write(f"\nStep: {self.step} | Evaluating initial suffix...")
-            #     target_llm_tf, target_llm_ar, basemodel_tf = evaluate_prompt(
-            #         cfg=self.cfg,
-            #         instruct=instruct,
-            #         suffix=suffix,
-            #         full_instruct=full_instruct,
-            #         target=target,
-            #         prompter=self.prompter,
-            #         target_llm=self.target_llm,
-            #         generate_target_llm_response=log_sequences,
-            #     )
-
-            #     # generate optimized suffix
-            #     suffix = advPrompterOpt(
-            #         cfg=self.cfg,
-            #         instruct=instruct,
-            #         target=target,
-            #         prompter=self.prompter,
-            #         target_llm=self.target_llm,
-            #     )
-
-            #     # combine instruct and optimized suffix to form optimized full instruct
-            #     full_instruct_text = MergedSeq(seqs=[instruct, suffix]).to_seq(
-            #         merge_dtype="ids"
-            #     )
-            #     full_instruct = Seq(
-            #         text=full_instruct_text.text,
-            #         tokenizer=self.target_llm.tokenizer,
-            #         device=self.target_llm.device,
-            #     )
-
-            #     # evaluate optimized suffix
-            #     if self.verbose:
-            #         tqdm.write(f"\nStep: {self.step} | Evaluating optimized suffix...")
-            #     target_llm_tf_opt, target_llm_ar_opt, basemodel_tf_opt = (
-            #         evaluate_prompt(
-            #             cfg=self.cfg,
-            #             instruct=instruct,
-            #             suffix=suffix,
-            #             full_instruct=full_instruct,
-            #             target=target,
-            #             prompter=self.prompter,
-            #             target_llm=self.target_llm,
-            #             generate_target_llm_response=True,
-            #         )
-            #     )
-
-            #     # store suffixes
-            #     for i in range(instruct.bs):
-            #         data.append(
-            #             (
-            #                 instruct.text[i],
-            #                 target.text[i],
-            #                 suffix.text[i],
-            #                 full_instruct.text[i],
-            #             )
-            #         )
-
-            # self.add_to_replay_buffer(
-            #     instruct=instruct,
-            #     suffix=suffix,
-            #     target=target,
-            #     target_llm_tf=target_llm_tf,
-            #     target_llm_tf_opt=target_llm_tf_opt,
-            #     target_llm_ar_opt=target_llm_ar_opt,
-            # )
-
-            # prompter_tf_opt = self.finetune_prompter()
-
-            # log_data(
-            #     log_table=self.train_table,
-            #     metrics=train_metrics,
-            #     step=self.step,
-            #     split=self.cfg.train.dataset_key,
-            #     batch_idx=batch_idx,
-            #     test_prefixes=self.test_prefixes,
-            #     affirmative_prefixes=self.affirmative_prefixes,
-            #     log_sequences_to_wandb=log_sequences and self.enable_wandb,
-            #     log_metrics_to_wandb=self.enable_wandb,
-            #     prompter_ar=prompter_ar,
-            #     target_llm_tf=target_llm_tf,
-            #     target_llm_ar=target_llm_ar,
-            #     basemodel_tf=basemodel_tf,
-            #     prompter_tf_opt=prompter_tf_opt,
-            # )
-
-            # self.step += instruct.bs
-
-        suffix_dataset_key = f"{self.cfg.train.dataset_key}_opt_{self.step}"
-        fields = ["instruct", "target", "suffix", "full_instruct"]
-        suffix_dataset = dotdict(
-            data=data,
-            fields=fields,
-            suffix_dataset_key=suffix_dataset_key,
-        )
-        self.save_suffix_dataset(
-            suffix_dataset, dir=self.cfg.train.suffix_opt_dataset_dir
-        )
-
-        if self.enable_wandb:
-            wandb.log(dict(train_examples=copy(self.train_table)), step=self.step)
-
-        avg_metrics = train_metrics.get_avg(
-            step=self.step, log_to_wandb=self.enable_wandb
-        )
-        tqdm.write(
-            f" Train loss epoch {self.epoch}: {avg_metrics['avg/train/target_llm/tf/loss']:.2f}"
-        )
+    
 
     def batch_to_context(self, batch):
         model_map = dict(

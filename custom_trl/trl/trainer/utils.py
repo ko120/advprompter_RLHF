@@ -52,7 +52,9 @@ from peft import LoraModel
 from ..import_utils import is_unsloth_available
 from ..trainer.model_config import ModelConfig
 
-
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
 if is_peft_available():
     from peft import LoraConfig, PeftConfig
 
@@ -959,13 +961,32 @@ def cap_exp(value, cap=-1):
     return torch.exp(torch.clamp(value, max=cap))
 
 
-def print_rich_table(df: pd.DataFrame) -> Table:
+# def print_rich_table(df: pd.DataFrame) -> Table:
+#     console = Console()
+#     table = Table(show_lines=True)
+#     for column in df.columns:
+#         table.add_column(column)
+#     for _, row in df.iterrows():
+#         table.add_row(*row.astype(str).tolist())
+#     console.print(table)
+
+def print_rich_table(df: pd.DataFrame) -> None:
     console = Console()
     table = Table(show_lines=True)
+
+    # Add columns to the table
     for column in df.columns:
         table.add_column(column)
+
+    # Add rows with escaped content
     for _, row in df.iterrows():
-        table.add_row(*row.astype(str).tolist())
+        escaped_row = [
+            Text.from_markup(str(cell), style=None) if isinstance(cell, str) else str(cell)
+            for cell in row
+        ]
+        table.add_row(*escaped_row)
+
+    # Print the table
     console.print(table)
 
 
@@ -1113,9 +1134,12 @@ def get_reward(
         lm_backbone = getattr(lm_backbone, lm_backbone.base_model_prefix)
     else:
         lm_backbone = getattr(model, model.base_model_prefix)
+    if query_responses.size(0) == 0:
+        pdb.set_trace()
 
     # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+    
     output = lm_backbone(
         input_ids=input_ids,
         attention_mask=attention_mask,

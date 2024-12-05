@@ -447,7 +447,7 @@ def llm_loader(llm_params, verbose=False):
     if llm_params.dtype == "float32":
         dtype = torch.float32
     elif llm_params.dtype == "float16":
-        dtype = torch.float16
+        dtype = torch.bfloat16 #bfloat16 for better numeric stability
     else:
         raise ValueError(f"Cannot load model with dtype {llm_params.dtype}")
     if llm_params.checkpoint == "stas/tiny-random-llama-2":
@@ -473,7 +473,7 @@ def llm_loader(llm_params, verbose=False):
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=dtype,  # For consistency with model weights, we use the same value as `torch_dtype`
                 bnb_4bit_quant_type=llm_params.quantization.bnb_4bit_quant_type,
-                bnb_4bit_use_double_quant=llm_params.quantization.use_bnb_nested_quant,
+                bnb_4bit_use_double_quant= llm_params.quantization.bnb_4bit_use_double_quant,
                 bnb_4bit_quant_storage=dtype,
             )
         elif llm_params.quantization.type  == "load_in_8bit":

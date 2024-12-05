@@ -257,7 +257,7 @@ def evaluate_next_token_candidates(
     # compute the losses on each sample
     merged = MergedSeq(seqs=[instruct_rep, suffix_rep, q_sample_seq])
     full_instruct = Seq(
-        text=merged.to_seq(merge_dtype="ids").text,
+        text=merged.to_seq(merge_dtype="ids").text, # merge in ids level extract text
         tokenizer=target_llm.tokenizer,
         device=target_llm.device,
     )

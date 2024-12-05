@@ -8,7 +8,7 @@ llm_params:
   quantization:
     type: "load_in_4bit"
     bnb_4bit_quant_type: "nf4"
-    use_bnb_nested_quant: false
+    bnb_4bit_use_double_quant: True
 
   lora_params: 
     warmstart: false
@@ -28,6 +28,6 @@ prompt_manager:
     - key: system_message
       msg: "<s>"
     - key: hyper_instruct
-      msg: "{instruct}"  # loaded from context
+      msg: "{instruct}"  # loaded from context 
     - key: suffix
       msg: "{suffix}"  # loaded from context

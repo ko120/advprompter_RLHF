@@ -116,6 +116,7 @@ class PPOTrainer(Trainer):
         reward_model: nn.Module,
         target_llm: nn.Module,
         train_loader: DataLoader,
+        eval_loader: DataLoader,
         cfg, # advprompter config
         processing_class: Optional[
             Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
@@ -123,7 +124,7 @@ class PPOTrainer(Trainer):
         ref_model: Optional[nn.Module]= None,
         value_model: Optional[nn.Module] = None,
         data_collator: Optional[DataCollatorWithPadding] = None,
-        eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
+    
         # less commonly used
         optimizers: tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         callbacks: Optional[list[TrainerCallback]] = None,
@@ -182,7 +183,7 @@ class PPOTrainer(Trainer):
         self.train_dataset_len = self.dataloader.effective_dataset_size
         self.value_model = value_model
         self.data_collator = data_collator
-        self.eval_dataset = eval_dataset
+        self.eval_dataloader = eval_loader
         self.optimizer, self.lr_scheduler = optimizers
         self.optimizer_cls_and_kwargs = None  # needed for transformers >= 4.47
 
@@ -191,7 +192,6 @@ class PPOTrainer(Trainer):
         #########
         if args.total_episodes is None:  # allow the users to define episodes in terms of epochs.
             args.total_episodes = int(args.num_train_epochs * self.train_dataset_len)
-        pdb.set_trace()
         accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
         self.accelerator = accelerator
 
@@ -293,12 +293,12 @@ class PPOTrainer(Trainer):
         )
         torch.manual_seed(self.local_seed)  # reset the local seed again
 
-        self.eval_dataloader = DataLoader(
-            self.eval_dataset,
-            batch_size=args.per_device_eval_batch_size,
-            collate_fn=self.data_collator,
-            drop_last=True,
-        )  # no need to shuffle eval dataset
+        # self.eval_dataloader = DataLoader(
+        #     self.eval_dataset,
+        #     batch_size=args.per_device_eval_batch_size,
+        #     collate_fn=self.data_collator,
+        #     drop_last=True,
+        # )  # no need to shuffle eval dataset
         self.eval_dataloader = accelerator.prepare(self.eval_dataloader)
 
         if self.is_deepspeed_enabled:
@@ -467,23 +467,22 @@ class PPOTrainer(Trainer):
                     suffix = prompter_ar.response_sample
                     
 
-                    # generate optimized suffix
-                    suffix = advPrompterOpt(
-                        cfg=self.cfg,
-                        instruct=instruct,
-                        target=target,
-                        prompter=self.prompter,
-                        target_llm=self.target_llm,
-                    )
+                    # # generate optimized suffix
+                    # suffix = advPrompterOpt(
+                    #     cfg=self.cfg,
+                    #     instruct=instruct,
+                    #     target=target,
+                    #     prompter=self.prompter,
+                    #     target_llm=self.target_llm,
+                    # )
                     # # combine instruct and optimized suffix to form optimized full instruct
                     # difference between "batch_generation" query response is that it shifted padding to the right
                     # while original one has in between paddings between instruct and suffix
                     query_responses = MergedSeq(seqs=[instruct, suffix]).to_seq(
-                        merge_dtype="ids"
+                        merge_dtype="ids" # merge sequence in ids level 
                     )
-                    
                     # in the main.py from advprompter, it again wrapped with Seq to shift the padding to right
-                    # we need to wrap around seq again inorder to use llm.py method by forcing them to use all same tokenizer
+                    # we need to wrap around seq again inorder to use llm.py method by moving tokenizer to prompter -> target
                     query_responses_to_target = Seq(
                         text=query_responses.text,
                         tokenizer=self.target_llm.tokenizer,
@@ -498,21 +497,22 @@ class PPOTrainer(Trainer):
                     )
 
                     # compute attack objective
-                    target_llm_tf = self.target_llm.compute_pred_loss_teacher_forced(
-                        key="target",
-                        full_instruct=query_responses_to_target,
-                        target=target,
-                        loss_params=dict(
-                            hard_labels=True,
-                            reweight_loss=self.cfg.reweight_loss,
-                        ),
-                    )
+                    with torch.no_grad():
+                        target_llm_tf = self.target_llm.compute_pred_loss_teacher_forced(
+                            key="target",
+                            full_instruct=query_responses_to_target,
+                            target=target,
+                            loss_params=dict(
+                                hard_labels=True,
+                                reweight_loss=self.cfg.reweight_loss,
+                            ),
+                        )
                     # later used for reward
-                    target_llm_tf = target_llm_tf.loss_batch # (B)
+                    target_llm_tfs = target_llm_tf.loss_batch # (B)
                     # extract response ids
-                    target_response = target_output.response_sample.ids
+                    target_responses = target_output.response_sample.ids
                     query_responses = query_responses.ids
-                   
+                    
                     
                     
                     
@@ -525,11 +525,12 @@ class PPOTrainer(Trainer):
                     # ADVPROMPTER
                     # processing smaller batch size with increament by args.local_rollout_forward_batch_size
                     # Objective: compute log_prob of response
-                    target_response = target_response[i : i + args.local_rollout_forward_batch_size]
+                    target_response = target_responses[i : i + args.local_rollout_forward_batch_size]
                     query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
                     response = suffix.ids[i : i + args.local_rollout_forward_batch_size]
                     logits = suffix.logits[i : i + args.local_rollout_forward_batch_size] # (B, response, emb)
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
+                    target_llm_tf = target_llm_tfs[i : i + args.local_rollout_forward_batch_size]
                     all_logprob = F.log_softmax(logits, dim=-1) # (B, response_len, emb)
                     # extract logprobs for response token
                     logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B, response_len)
@@ -557,14 +558,7 @@ class PPOTrainer(Trainer):
                             ref_output = forward(model.policy, query_response, processing_class.pad_token_id)
                     else:
                         ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
-                    ## generate target response from target llm model 
-                    # target_output = self.target_llm.generate_autoregressive(
-                    #     key="suffix",
-                    #     max_new_tokens=self.cfg.train.q_params.max_new_tokens,
-                    #     instruct=instruct,
-                    # )
-
-
+            
 
                     # # ORIGINAL
                     # # Objective: forward ref_policy
@@ -574,9 +568,9 @@ class PPOTrainer(Trainer):
                     # else:
                     #     ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
                   
-                    
 
                     # ORIGINAL
+                    # Objective: compute log_prob of response
                     # extracting response logit only since query_response=[input+response]
                     ref_logits = ref_output.logits[:, context_length - 1 : -1] # (B,response_length,emb_dim)
                     ref_logits /= args.temperature + 1e-7
@@ -585,20 +579,6 @@ class PPOTrainer(Trainer):
                     ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
                     del ref_output, ref_logits, ref_all_logprob
                     torch.cuda.empty_cache()
-
-
-                    ## ADVPROMPTER
-                    # # extracting response logit only since query_response=[input+response]
-                    # TODO: output padding is shifted to right, so may need to modify this to extract response logit
-                    # query_length_before_pad =first_true_indices(query == processing_class.pad_token_id) - 1
-                    # ref_logits = ref_output.logits[:, query_length_before_pad] # (B,response_length,emb_dim)
-                    # ref_logits /= args.temperature + 1e-7
-                    # ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
-                    # # extract logprob corresponding to response token , i.e. pi_ref(a|s)
-                    # ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
-                    # del ref_output, ref_logits, ref_all_logprob
-                    # torch.cuda.empty_cache()
-
 
                     
                     # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
@@ -615,6 +595,7 @@ class PPOTrainer(Trainer):
                     sequence_length = first_true_indices(postprocessed_response == processing_class.pad_token_id) - 1 # response_len - 1
 
                     # ORIGINAL
+                    # Objective: obtain value and reward
                     # unwrapped_value_model = accelerator.unwrap_model(model).value_model
                     # # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
                     # full_value, _, _ = get_reward(
@@ -627,7 +608,7 @@ class PPOTrainer(Trainer):
                     # ) # (B)
 
                     # ADVPROMPTER
-                    #TODO: Check get_reward model implementation
+                    # Objective: obtain value and reward
                     # Response Processing 2. run reward model on the truncated responses
                     unwrapped_value_model = accelerator.unwrap_model(model).value_model
                     # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
@@ -671,7 +652,7 @@ class PPOTrainer(Trainer):
                 # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
                 response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1) # (B, response_len)
                 padding_mask = response_idxs > sequence_lengths.unsqueeze(1) # appending padding when idx > response len
-                logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
+                logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB) # mask invalid log prob=1
                 ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
                 sequence_lengths_p1 = sequence_lengths + 1
                 padding_mask_p1 = response_idxs > (sequence_lengths_p1.unsqueeze(1))
@@ -823,7 +804,7 @@ class PPOTrainer(Trainer):
             gc.collect()
 
             if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
-                self.generate_completions(sampling=True)
+                # self.generate_completions(sampling=True)
                 torch.cuda.empty_cache()
             del (
                 query_responses,
@@ -878,26 +859,52 @@ class PPOTrainer(Trainer):
         processing_class = self.processing_class
         generation_config = GenerationConfig(
             max_new_tokens=self.args.response_length,
-            temperature=(0.01 + 1e-7),
-            top_k=0.0,
-            top_p=1.0,
+            temperature= 0.7,#(0.01 + 1e-7),
+            # top_k=0.0,
+            top_p=0.92,
             do_sample=True,
         )
 
         table = defaultdict(list)
         with unwrap_model_for_generation(self.policy_and_value, self.accelerator) as unwrapped_model:
             for batch in self.eval_dataloader:
-                query = batch["input_ids"]
+                context = self.batch_to_context(batch)
+                query = context.instruct.ids
                 with torch.no_grad():
                     context_length = query.shape[1]
-                    query_response, _ = batch_generation(
-                        unwrapped_model.policy,
-                        query,
-                        query.shape[0],
-                        processing_class.pad_token_id,
-                        generation_config,
+                    # ORIGNAL
+                    # query_response, _ = batch_generation(
+                    #     unwrapped_model.policy,
+                    #     query,
+                    #     query.shape[0],
+                    #     processing_class.pad_token_id,
+                    #     generation_config,
+                    # )
+                    # response = query_response[:, context_length:]
+
+                    # ADVPROMPTER
+                    prompter_ar = self.prompter.generate_autoregressive(
+                        key="suffix",
+                        max_new_tokens=self.cfg.train.q_params.max_new_tokens,
+                        instruct=context.instruct,
                     )
-                    response = query_response[:, context_length:]
+                    full_instruct = MergedSeq(seqs=[context.instruct, prompter_ar.response_sample]).to_seq(
+                        merge_dtype="ids"
+                    )
+                    full_instruct = Seq(
+                        text=full_instruct.text,
+                        tokenizer=self.target_llm.tokenizer,
+                        device=self.target_llm.device,
+                    )
+                    target_llm_ar = self.target_llm.generate_autoregressive(
+                        key="target",
+                        max_new_tokens=self.cfg.train.q_params.max_new_tokens,
+                        full_instruct=full_instruct,
+                    )
+                   
+                    query = full_instruct.ids
+                    response = target_llm_ar.response_sample.ids
+                    
                     postprocessed_response = response
                     if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
@@ -906,10 +913,10 @@ class PPOTrainer(Trainer):
                     table["query"].extend(
                         gather_object(processing_class.batch_decode(query, skip_special_tokens=True))
                     )
+                    # initial response have [/INST] due to target llm prompt template
                     table["model response"].extend(
                         gather_object(processing_class.batch_decode(postprocessed_response))
                     )
-
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
                     _, score, _ = get_reward(
                         self.reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
@@ -927,7 +934,11 @@ class PPOTrainer(Trainer):
 
                 if wandb.run is not None:
                     wandb.log({"completions": wandb.Table(dataframe=df)})
-
+    def remove_tags(self,value, tags=["[/INST]"]):
+        if isinstance(value, str):
+            for tag in tags:
+                value = value.replace(tag, "")
+        return value
     def create_model_card(
         self,
         model_name: Optional[str] = None,

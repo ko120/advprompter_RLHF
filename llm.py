@@ -144,8 +144,7 @@ class LLM(nn.Module):
         using given context, it outputs struct with original query, next seq prediction
         and perplexity
         """
-        # convert context dict with instruct and suffix to query (instruct) and 
-        # target response pair 
+        # append system prompt to be ready to perform forward pass
         query_seq, response_teacher_seq = self.prepare_prompt(
             context, up_to_key=key, return_key_seq=True
         )
@@ -247,7 +246,7 @@ class LLM(nn.Module):
         seqs = []
         for msg_dct in self.params.prompt_manager.prompt_template:
             # self.params.prompt_manager.prompt_template: 
-            # prompter:[{'key': 'system_message', 'msg': '<s>'}, {'key': 'hyper_instruct', 'msg': '{instruct}'}, {'key': 'suffix', 'msg': '{suffix}'}]
+            # prompter:[{'key': 'system_message', 'msg': '<s>' (start of token)}, {'key': 'hyper_instruct', 'msg': '{instruct}'}, {'key': 'suffix', 'msg': '{suffix}'}]
             # target llm : [{'key': 'system_message', 'msg': '<s>[INST]'}, {'key': 'full_instruct', 'msg': '{full_instruct}'}, {'key': 'separator', 'msg': '[/INST]'}, {'key': 'target', 'msg': '{target}'}]
             if (
                 up_to_key is not None
@@ -255,6 +254,7 @@ class LLM(nn.Module):
                 and not return_key_seq
             ): # when it reaches upto key, terminate purpose of upto key is to cut off seq until upto key
                 break
+            # convert msg (str) to seq (struct)
             seq = msg_to_seq(
                 msg=msg_dct.msg,
                 tokenizer=self.tokenizer,
