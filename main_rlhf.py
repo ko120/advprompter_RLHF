@@ -12,6 +12,7 @@ from datasets import load_dataset
 import csv
 import copy
 import os
+
 import hydra
 import numpy as np
 import omegaconf
@@ -47,6 +48,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
+    AutoTokenizer,
     AutoConfig)
 from advprompteropt import advPrompterOpt, evaluate_prompt
 import pdb
@@ -71,34 +73,36 @@ class Workspace:
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
         self.target_llm = LLM(cfg.target_llm, verbose=self.verbose)
-        quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,  # For consistency with model weights, we use the same value as `torch_dtype`
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant= True,
-                bnb_4bit_quant_storage=torch.bfloat16, # we need to use bfloat16 instead of float16 for better numeric stability
-            )
+        tqdm.write("Initializing RewardLLM...")
+        self.reward_llm = LLM(cfg.reward, verbose=self.verbose)
+        tqdm.write("Initializing ValueLLM...")
+        self.value_llm = LLM(cfg.value, verbose=self.verbose)
+     
+        # quantization_config = BitsAndBytesConfig(
+        #         load_in_4bit=True,
+        #         bnb_4bit_compute_dtype=torch.bfloat16,  # For consistency with model weights, we use the same value as `torch_dtype`
+        #         bnb_4bit_quant_type="nf4",
+        #         bnb_4bit_use_double_quant= True,
+        #         bnb_4bit_quant_storage=torch.bfloat16, # we need to use bfloat16 instead of float16 for better numeric stability
+        #     )
 
         
-        # if using RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits model is quantized on 32 bit, so input should be 32 bit 
-        self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
-                                                                             torch_dtype=torch.bfloat16,num_labels=1,
-                                                                                quantization_config= quantization_config,
-                                                                             )
-        self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
-                                                                             torch_dtype=torch.bfloat16,num_labels=1,
-                                                                             quantization_config = quantization_config,
-                                                                             )
-        lora_config_dct = dict(self.cfg.value.llm_params.lora_params.lora_config)
-        lora_config_dct["target_modules"] = [
-            m for m in self.cfg.value.llm_params.lora_params.lora_config["target_modules"]
-        ]
-        lora_config = LoraConfig(**lora_config_dct)
-        self.value_llm  = get_peft_model(self.value_llm , lora_config)
-
-        # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
-                                                                    
-        # self.value_llm = AutoModelForSequenceClassification.from_pretrained("EleutherAI/pythia-1b-deduped", num_labels=1)
+        # # if using RichardErkhov/cais_-_HarmBench-Mistral-7b-val-cls-4bits model is quantized on 32 bit, so input should be 32 bit 
+        # self.reward_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
+        #                                                                      torch_dtype=torch.bfloat16,num_labels=1,
+        #                                                                         quantization_config= quantization_config,
+        #                                                                      )
+        # self.value_llm = AutoModelForSequenceClassification.from_pretrained("RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits", 
+        #                                                                      torch_dtype=torch.bfloat16,num_labels=1,
+        #                                                                      quantization_config = quantization_config,
+        #                                                                      )
+        # lora_config_dct = dict(self.cfg.value.llm_params.lora_params.lora_config)
+        # lora_config_dct["target_modules"] = [
+        #     m for m in self.cfg.value.llm_params.lora_params.lora_config["target_modules"]
+        # ]
+        # lora_config = LoraConfig(**lora_config_dct)
+        # self.value_llm  = get_peft_model(self.value_llm , lora_config)
+        # pdb.set_trace()
         self.test_prefixes = read_csv_file(self.cfg.data.test_prefixes_pth)
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth

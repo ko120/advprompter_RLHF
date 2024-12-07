@@ -8,6 +8,7 @@ import json
 from functools import wraps
 from tqdm import tqdm
 from huggingface_hub import snapshot_download
+from accelerate import  Accelerator
 
 import wandb
 import numpy as np
@@ -482,21 +483,24 @@ def llm_loader(llm_params, verbose=False):
         else:
             quantization_config = None
             
-        if llm_params.classification:
+        if llm_params.classification: # value or reward model
             model = AutoModelForSequenceClassification.from_pretrained(
                 llm_params.checkpoint,
                 torch_dtype=dtype,
-                quantization_config = quantization_config
-            )
+                #quantization_config = quantization_config,
+                num_labels =1,
+                use_cache=False,
+            ) # for quantization, it automatically use accelerator, so don't set model.to(device)
             embedding_matrix = None
         else:
             model = AutoModelForCausalLM.from_pretrained(
                     llm_params.checkpoint,
-                    low_cpu_mem_usage=True,
+                    #low_cpu_mem_usage=True, # this automatically trigers accelerator, that cause initialization error in PPOTrainer
                     torch_dtype=dtype,
-                    quantization_config = quantization_config
+                    quantization_config = quantization_config,
+                    use_cache=False,
                 )
-            embedding_matrix = get_embedding_matrix(model).to(llm_params.device)
+            embedding_matrix = None # get_embedding_matrix(model).to(llm_params.device)
   
         
             

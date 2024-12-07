@@ -15,6 +15,7 @@
 import gc
 import math
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3" 
 import textwrap
 import time
 from collections import defaultdict
@@ -139,9 +140,24 @@ class PPOTrainer(Trainer):
         self.args = args
         self.cfg = cfg
         self.processing_class = processing_class
-        # assigning model component from prompter
+        # assigning llm wrapper and model
         self.prompter = model
+        self.target_llm = target_llm
+        self.value_llm = value_model
+        self.reward_llm = reward_model
+
         self.model = model.model
+        self.reward_model = reward_model.model
+        self.value_model = value_model.model
+        self.target_model = target_llm.model
+
+        self.dataloader = train_loader
+        self.train_dataset_len = self.dataloader.effective_dataset_size
+        self.data_collator = data_collator
+        self.eval_dataloader = eval_loader
+        self.optimizer, self.lr_scheduler = optimizers
+        self.optimizer_cls_and_kwargs = None  # needed for transformers >= 4.47
+
 
         # Define the collator if not provided
         if data_collator is None:
@@ -177,16 +193,8 @@ class PPOTrainer(Trainer):
         else:
             self.ref_model = create_reference_model(self.model)
 
-        self.reward_model = reward_model
-        self.target_llm = target_llm
-        self.dataloader = train_loader
-        self.train_dataset_len = self.dataloader.effective_dataset_size
-        self.value_model = value_model
-        self.data_collator = data_collator
-        self.eval_dataloader = eval_loader
-        self.optimizer, self.lr_scheduler = optimizers
-        self.optimizer_cls_and_kwargs = None  # needed for transformers >= 4.47
-
+        
+      
         #########
         # calculate various batch sizes
         #########
@@ -196,10 +204,11 @@ class PPOTrainer(Trainer):
         self.accelerator = accelerator
 
         # change device for prompter and target llm
-        self.prompter.device = accelerator.device
-        self.prompter.model = self.prompter.model.to(accelerator.device)
-        self.target_llm.device = accelerator.device
-        self.target_llm.model = self.target_llm.model.to(accelerator.device)
+        # self.prompter.device = accelerator.device
+        # self.prompter.model = self.prompter.model.to(accelerator.device)
+        # self.target_llm.device = accelerator.device
+        # self.target_llm.model = self.target_llm.model.to(accelerator.device)
+        # self.reward_llm.device = accelerator.device
         args.world_size = accelerator.num_processes
         args.local_batch_size = (
             args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
@@ -306,8 +315,8 @@ class PPOTrainer(Trainer):
                 self.reward_model, args.per_device_train_batch_size, args.fp16, args.bf16
             )
             # passing model objective from LLM object for deepspeed init
-            self.target_llm  = prepare_deepspeed(
-                self.target_llm.model, args.per_device_train_batch_size, args.fp16, args.bf16
+            self.target_model   = prepare_deepspeed(
+                self.target_model , args.per_device_train_batch_size, args.fp16, args.bf16
             )
 
             if self.ref_model is None:
@@ -333,7 +342,7 @@ class PPOTrainer(Trainer):
 
     @contextmanager
     def null_ref_context(self):
-        """Context manager for handling null reference model (that is, peft adapter manipulation)."""
+    # disable adapter when ref model = None since we are using model to obtain ref_logit
         with self.accelerator.unwrap_model(
             self.policy_and_value.policy
         ).disable_adapter() if self.is_peft_model and not self.ref_adapter_name else nullcontext():
@@ -432,7 +441,6 @@ class PPOTrainer(Trainer):
                 instruct = context.instruct
                 target = context.target
                 
-                queries = instruct.ids
                 context_length = instruct.ids.shape[1]
                 responses = []
                 postprocessed_responses = []
@@ -441,6 +449,7 @@ class PPOTrainer(Trainer):
                 scores = []
                 sequence_lengths = []
                 values = []
+                target_responses = []
 
                 
                 # unwrap_model_for_generation: context manager for unwrapping neccesary for distributed training
@@ -495,7 +504,6 @@ class PPOTrainer(Trainer):
                         max_new_tokens=self.cfg.train.q_params.max_new_tokens,
                         full_instruct=query_responses_to_target,
                     )
-
                     # compute attack objective
                     with torch.no_grad():
                         target_llm_tf = self.target_llm.compute_pred_loss_teacher_forced(
@@ -507,11 +515,20 @@ class PPOTrainer(Trainer):
                                 reweight_loss=self.cfg.reweight_loss,
                             ),
                         )
+
+                    # prepare componenets   
                     # later used for reward
                     target_llm_tfs = target_llm_tf.loss_batch # (B)
                     # extract response ids
-                    target_responses = target_output.response_sample.ids
+                    target_responses_ids = target_output.response_sample.ids #(B, targt_len)
                     query_responses = query_responses.ids
+                    queries = instruct.ids
+                    logitss = suffix.logits
+                
+
+                    
+                    torch.cuda.empty_cache()
+
                     
                     
                     
@@ -521,14 +538,15 @@ class PPOTrainer(Trainer):
     
                 
                 # generate query.ids, response.ids, response logit here with llm.auto regressive
-                for i in range(0, instruct.ids.shape[0], args.local_rollout_forward_batch_size):
+                for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size): # sampling
                     # ADVPROMPTER
                     # processing smaller batch size with increament by args.local_rollout_forward_batch_size
                     # Objective: compute log_prob of response
-                    target_response = target_responses[i : i + args.local_rollout_forward_batch_size]
-                    query = instruct.ids[i : i + args.local_rollout_forward_batch_size]
+                    
+                    target_response = target_responses_ids[i : i + args.local_rollout_forward_batch_size]
+                    query = queries[i : i + args.local_rollout_forward_batch_size]
                     response = suffix.ids[i : i + args.local_rollout_forward_batch_size]
-                    logits = suffix.logits[i : i + args.local_rollout_forward_batch_size] # (B, response, emb)
+                    logits = logitss[i : i + args.local_rollout_forward_batch_size] # (B, response, emb)
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
                     target_llm_tf = target_llm_tfs[i : i + args.local_rollout_forward_batch_size]
                     all_logprob = F.log_softmax(logits, dim=-1) # (B, response_len, emb)
@@ -555,7 +573,8 @@ class PPOTrainer(Trainer):
                     # Objective: forward ref_policy to get logit
                     if ref_policy is None:
                         with self.null_ref_context():
-                            ref_output = forward(model.policy, query_response, processing_class.pad_token_id)
+                            response_seq=Seq(ids= response,device= self.model.device, tokenizer= self.prompter.tokenizer)
+                            ref_output = self.prompter.model_forward(response_seq,use_basemodel=True) # this will disable LoRa adapter
                     else:
                         ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
             
@@ -568,17 +587,29 @@ class PPOTrainer(Trainer):
                     # else:
                     #     ref_output = forward(ref_policy, query_response, processing_class.pad_token_id) # (B, query_len + response_len)
                   
-
-                    # ORIGINAL
+                    # AdvPrompter
                     # Objective: compute log_prob of response
                     # extracting response logit only since query_response=[input+response]
-                    ref_logits = ref_output.logits[:, context_length - 1 : -1] # (B,response_length,emb_dim)
+                    ref_logits = ref_output.logits # (B,response_length,emb_dim)
                     ref_logits /= args.temperature + 1e-7
                     ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
                     # extract logprob corresponding to response token , i.e. pi_ref(a|s)
                     ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
                     del ref_output, ref_logits, ref_all_logprob
                     torch.cuda.empty_cache()
+
+                    # # ORIGINAL
+                    # # Objective: compute log_prob of response
+                    # # extracting response logit only since query_response=[input+response]
+                    # ref_logits = ref_output.logits[:, context_length - 1 : -1] # (B,response_length,emb_dim)
+                    # ref_logits /= args.temperature + 1e-7
+                    # ref_all_logprob = F.log_softmax(ref_logits, dim=-1) # (B,response_length,emb_dim)
+                    # # extract logprob corresponding to response token , i.e. pi_ref(a|s)
+                    # ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1) # (B,response_length)
+                    # del ref_output, ref_logits, ref_all_logprob
+                    # torch.cuda.empty_cache()
+
+
 
                     
                     # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
@@ -611,20 +642,26 @@ class PPOTrainer(Trainer):
                     # Objective: obtain value and reward
                     # Response Processing 2. run reward model on the truncated responses
                     unwrapped_value_model = accelerator.unwrap_model(model).value_model
+                    # TODO: fix wrapping 
                     # compute value using raw query_response, while using processed query_response for reward to obtain meaningful reward
-                    value, _, _ = get_reward(
-                        unwrapped_value_model, target_response, processing_class.pad_token_id, context_length
-                    ) # (B, response len, 1)
-                    value = value.squeeze(-1) #(B, response_len)
+                    # suffix_target_response =  torch.cat((target_response), dim= -1)
+                    suffix_target_response_value_seq=Seq(ids= target_response, tokenizer= self.value_llm.tokenizer, device= self.value_model.device)
+                    suffix_target_response_reward_seq=Seq(ids= target_response, tokenizer= self.reward_llm.tokenizer, device= self.reward_model.device)
 
+                    # TODO: make the value(input + suffix) =predict reward instead of V(target_response)
+
+                    full_value, _, _ = get_reward(
+                        unwrapped_value_model, suffix_target_response_value_seq.ids, self.value_llm.tokenizer.pad_token_id, context_length
+                    ) # (B, target_resonse len, 1)
+                    # value = full_value[:, (query.shape[1]+postprocessed_response.shape[1]) - 1 : -1].squeeze(-1) #(B, target_len)
+                    value = full_value.squeeze(-1) #(B, target_len)
                     _, score, _ = get_reward(
-                        reward_model, target_response, processing_class.pad_token_id, context_length
+                        self.reward_model, suffix_target_response_reward_seq.ids, self.reward_llm.tokenizer.pad_token_id, context_length
                     ) # (B) 
                     # add score with attack objective loss
-                    score += target_llm_tf
+                    score += target_llm_tf.to(self.reward_model.device)
 
-
-
+                    target_responses.append(target_response)
                     responses.append(response)
                     postprocessed_responses.append(postprocessed_response)
                     logprobs.append(logprob)
@@ -633,6 +670,7 @@ class PPOTrainer(Trainer):
                     scores.append(score)
                     values.append(value)
                 responses = torch.cat(responses, 0)
+                target_responses = torch.cat(target_responses, 0)
                 postprocessed_responses = torch.cat(postprocessed_responses, 0)
                 logprobs = torch.cat(logprobs, 0)
                 ref_logprobs = torch.cat(ref_logprobs, 0)
@@ -660,9 +698,10 @@ class PPOTrainer(Trainer):
                 # 4. compute rewards
                 kl = logprobs - ref_logprobs
                 non_score_reward = -args.kl_coef * kl
+              
                 rewards = non_score_reward.clone() # (B,response_len)
-                actual_start = torch.arange(rewards.size(0), device=rewards.device) # tensor([0, 1, 2, 3, 4, 5, 6, 7], device='cuda:0')
-                actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths) # tensor([29, 29, 29, 29, 29, 29, 29, 29], device='cuda:0')
+                actual_start = torch.arange(rewards.size(0), device=rewards.device) 
+                actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths) 
                 # adding reward on end token to avoid sparse reward
                 rewards[[actual_start, actual_end]] += scores
                 # 5. whiten rewards
@@ -699,34 +738,40 @@ class PPOTrainer(Trainer):
                             micro_batch_inds = mini_batch_inds[micro_batch_start:micro_batch_end]
                             mb_advantage = advantages[micro_batch_inds]
                             mb_responses = responses[micro_batch_inds]
-                            mb_query_responses = query_responses[micro_batch_inds]
+                            mb_query_responses = query_responses[micro_batch_inds] # (B, input_len + suffix_len)
                             mb_logprobs = logprobs[micro_batch_inds]
                             mb_return = returns[micro_batch_inds]
                             mb_values = values[micro_batch_inds]
+                            mb_target_responses = target_responses[micro_batch_inds]
 
-                            output, vpred_temp = forward(model, mb_query_responses, processing_class.pad_token_id)
-                            logits = output.logits[:, context_length - 1 : -1]
+                            #TODO: for later we need to take care that target response has different tokenizer than query_response
+                            # output (B, query_response len, emb), vpred_temp (B, query_response_len, 1)
+                            output, _ = forward(model, mb_query_responses, processing_class.pad_token_id)
+                            logits = output.logits[:, context_length - 1 : -1] # (B, response_len)
                             logits /= args.temperature + 1e-7
                             new_all_logprobs = F.log_softmax(logits, dim=-1)
                             new_logprobs = torch.gather(new_all_logprobs, 2, mb_responses.unsqueeze(-1)).squeeze(-1)
                             new_logprobs = torch.masked_fill(
                                 new_logprobs, padding_mask[micro_batch_inds], INVALID_LOGPROB
                             )
-                            vpred = vpred_temp[:, context_length - 1 : -1].squeeze(-1)
+                            # instruct + suffix  previously : (target response = y) R(Y)
+                            vpred_temp, _, _ = get_reward(model.value_model, mb_target_responses,
+                                                                        self.value_llm.tokenizer.pad_token_id, mb_target_responses.shape[1])
+                            vpred = vpred_temp.squeeze(-1) # (B, targe_response_len)
                             vpred = torch.masked_fill(vpred, padding_mask_p1[micro_batch_inds], 0)
                             vpredclipped = torch.clamp(
                                 vpred,
                                 mb_values - args.cliprange_value,
                                 mb_values + args.cliprange_value,
                             )
-                            vf_losses1 = torch.square(vpred - mb_return)
+                            vf_losses1 = torch.square(vpred - mb_return) # return is too high
                             vf_losses2 = torch.square(vpredclipped - mb_return)
                             vf_loss_max = torch.max(vf_losses1, vf_losses2)
                             vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
                             vf_clipfrac = masked_mean(
                                 (vf_losses2 > vf_losses1).float(), ~padding_mask_p1[micro_batch_inds]
                             )
-                            logprobs_diff = new_logprobs - mb_logprobs
+                            logprobs_diff = new_logprobs - mb_logprobs # KL 
                             ratio = torch.exp(logprobs_diff)
                             pg_losses = -mb_advantage * ratio
                             pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
@@ -762,7 +807,7 @@ class PPOTrainer(Trainer):
                         output, vpred_temp, logits, new_all_logprobs, new_logprobs, vpred, vpredclipped,
                         vf_losses1, vf_losses2, vf_loss, vf_clipfrac, logprobs_diff, ratio, pg_losses, pg_losses2, pg_loss_max,
                         pg_loss, loss, pg_clipfrac, prob_dist, entropy, approxkl, mb_return,
-                        mb_advantage, mb_values, mb_responses, mb_query_responses, mb_logprobs,
+                        mb_advantage, mb_values, mb_responses, mb_query_responses, mb_logprobs, mb_target_responses
                     )
                     # fmt: on
                     torch.cuda.empty_cache()
@@ -804,7 +849,7 @@ class PPOTrainer(Trainer):
             gc.collect()
 
             if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
-                # self.generate_completions(sampling=True)
+                self.generate_completions(sampling=True)
                 torch.cuda.empty_cache()
             del (
                 query_responses,
@@ -824,6 +869,7 @@ class PPOTrainer(Trainer):
                 actual_end,
                 advantages,
                 returns,
+                target_responses
             )
             torch.cuda.empty_cache()
 
@@ -898,7 +944,6 @@ class PPOTrainer(Trainer):
                     )
                     target_llm_ar = self.target_llm.generate_autoregressive(
                         key="target",
-                        max_new_tokens=self.cfg.train.q_params.max_new_tokens,
                         full_instruct=full_instruct,
                     )
                    
@@ -917,16 +962,25 @@ class PPOTrainer(Trainer):
                     table["model response"].extend(
                         gather_object(processing_class.batch_decode(postprocessed_response))
                     )
-                    postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
+                    # postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
+                    
                     _, score, _ = get_reward(
-                        self.reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
+                        self.reward_model, postprocessed_response.to(self.reward_model.device), self.reward_llm.tokenizer.pad_token_id, context_length
                     )
                     table["score"].extend(self.accelerator.gather(score).float().cpu().numpy())
 
                 if sampling:
                     break
         df = pd.DataFrame(table)
-
+        
+        import re
+        def sanitize_markup(text):
+            # Check if input is a string
+            if isinstance(text, str):
+                # Use regular expression to remove anything within square brackets, including the brackets
+                return re.sub(r"\[.*?\]", "", text)
+            return text
+        df = df.map(sanitize_markup)
         if self.accelerator.is_main_process:
             print_rich_table(df.iloc[0 : 0 + 5])
             if "wandb" in args.report_to:
@@ -934,11 +988,7 @@ class PPOTrainer(Trainer):
 
                 if wandb.run is not None:
                     wandb.log({"completions": wandb.Table(dataframe=df)})
-    def remove_tags(self,value, tags=["[/INST]"]):
-        if isinstance(value, str):
-            for tag in tags:
-                value = value.replace(tag, "")
-        return value
+
     def create_model_card(
         self,
         model_name: Optional[str] = None,

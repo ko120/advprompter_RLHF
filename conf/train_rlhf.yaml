@@ -6,20 +6,6 @@ defaults:
 
 mode: train
 
-prompter: 
-  llm_params:
-    accelerator: true
-target_llm:
-  llm_params:
-    accelerator: true
-# reward:
-#   llm_params:
-#     accelerator: true
-# value:
-#   llm_params:
-#     accelerator: true
-
-
 
 pretrain:
   enable: false
@@ -31,7 +17,7 @@ pretrain:
 
 train:
   epochs: 10
-  batch_size: 8
+  batch_size: 8 # need to have per_device_train_batch_size * gradient_accumulation_steps * num_mini_batches
   enable_accelerator: True
   dataset_key: foo
   dataset_pth: "${data.data_dir}/harmful_behaviors/dataset/train.csv"
@@ -71,19 +57,19 @@ train:
     max_loss_const: 1.0
     config:
       output_dir: "${output_dir}/"
-      learning_rate: 5e-5
+      learning_rate: 3e-5
       gamma: 1
       lam: 0.95
-      kl_coef: 0.001
-      vf_coef: 1
+      kl_coef: 0.05 # scales between kl score reward and reward generated score
+      vf_coef: 0.01 # scale between policy loss and value loss 
       # gradient_accumulation_steps: 2
       missing_eos_penalty: 1.0
       # for deep speed
       num_ppo_epochs: 1
-      num_mini_batches: 1
-      per_device_train_batch_size: 1
-      gradient_accumulation_steps: 8
-      local_rollout_forward_batch_size: 1
+      num_mini_batches: 1 # ppo iter batch
+      per_device_train_batch_size: 4
+      gradient_accumulation_steps: 2
+      local_rollout_forward_batch_size: 2
     gen_params:
       do_sample: true
       temperature: 0.7

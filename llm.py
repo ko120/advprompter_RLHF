@@ -19,9 +19,7 @@ from utils import (
     loss_seqs,
 )
 from custom_trl.trl.trainer.model_config import ModelConfig
-# used for PPO
-SIMPLE_CHAT_TEMPLATE = "{% for message in messages %}{{message['role'].capitalize() + ': ' + message['content'] + '\n\n'}}{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
-
+from peft import LoraModel
 
 class LLM(nn.Module):
     def __init__(self, params, verbose=False) -> None:
@@ -30,10 +28,14 @@ class LLM(nn.Module):
         self.verbose = verbose
 
        
-        self.device = self.params.llm_params.device
+        
         self.model, self.tokenizer, self.embedding_matrix = llm_loader(
             llm_params=params.llm_params, verbose=verbose
         )
+        
+        self.device = self.model.device
+        # self.model = self.model.to(self.device)
+        
         if self.tokenizer.pad_token is None:
             if self.tokenizer.unk_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -42,8 +44,6 @@ class LLM(nn.Module):
                 # We might run into trouble here because the Seq class will automatically treat any eos_token as a pad_token and set the padding mask to 0 for this token
                 self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        if self.tokenizer.chat_template is None:
-            self.tokenizer.chat_template = SIMPLE_CHAT_TEMPLATE
                 
         if self.params.allow_non_ascii:
             self.disallowed_ids = None
@@ -53,18 +53,41 @@ class LLM(nn.Module):
     def save_pretrained(self, save_path):
         self.model.save_pretrained(save_path, save_embedding_layers=True)
 
-    def model_forward(self, query_seq, use_basemodel=False):
+    def model_forward(self, query_seq, use_basemodel=False, reward=False):
         # reorder such that all masked tokens are on the left
         mask = query_seq.mask
         sorted_mask, indices = torch.sort(mask.long(), dim=1, stable=True)
         # when using base model disable lora adaptor
         with self.model.disable_adapter() if use_basemodel else nullcontext():
             if query_seq.is_hard: # discrete token
-                ids = query_seq.ids
-                sorted_ids = ids.gather(1, indices)
-                shifted_sorted_pred_logits = self.model(
-                    input_ids=sorted_ids, attention_mask=sorted_mask
-                ).logits
+                if reward:
+                    if isinstance(self.model.base_model, LoraModel):
+                        # if Lora model, we need to take one more step to extract backbone
+                        lm_backbone = getattr(self.model, self.model.base_model_prefix)
+                        lm_backbone = getattr(lm_backbone, lm_backbone.base_model_prefix)
+                    else:
+                        lm_backbone = getattr(self.model, self.model.base_model_prefix)
+                    ids = query_seq.ids
+                    sorted_ids = ids.gather(1, indices)
+                    position_ids = sorted_mask.cumsum(1) - sorted_mask.long()  # exclusive cumsum
+
+                    output = lm_backbone(
+                        input_ids=sorted_ids,
+                        attention_mask=sorted_mask,
+                        position_ids=position_ids,
+                        return_dict=True,
+                        output_hidden_states=True,
+                        use_cache=False,  # otherwise mistral-based RM would error out
+                    )
+
+                    shifted_sorted_pred_logits = self.model.score(output.hidden_states[-1]) # (B,seq_len, 1)
+                    
+                else:
+                    ids = query_seq.ids
+                    sorted_ids = ids.gather(1, indices)
+                    shifted_sorted_pred_logits = self.model(
+                        input_ids=sorted_ids, attention_mask=sorted_mask, output_hidden_states=True, use_cache=False
+                    ).logits # (B,seq_len, emb)
             else: # embedding
                 embeds = query_seq.get_embed(self.embedding_matrix)
                 indices_extended = indices[:, :, None].repeat(1, 1, embeds.shape[-1])
@@ -78,15 +101,15 @@ class LLM(nn.Module):
         # generate output in autoregressive manner, so shifted pad tokens doesn't matter.
         # Apparently, decoder only models need left padding:
         # https://github.com/huggingface/transformers/issues/26072
-        dummy_pred_logits = torch.zeros_like(shifted_sorted_pred_logits[:, :1, :])
+        dummy_pred_logits = torch.zeros_like(shifted_sorted_pred_logits[:, :1, :]) # (B, 1, emb)
         sorted_pred_logits = torch.cat(
             [dummy_pred_logits, shifted_sorted_pred_logits[:, :-1, :]], dim=1
-        )
-        reverse_indices = indices.argsort(dim=1)
+        ) # (B, seq, emb)
+        reverse_indices = indices.argsort(dim=1) # (B, seq)
         reverse_indices_extended = reverse_indices[:, :, None].repeat(
             1, 1, sorted_pred_logits.shape[-1]
-        )
-        shifted_pred_logits = sorted_pred_logits.gather(1, reverse_indices_extended)
+        ) # (B,seq, emb)
+        shifted_pred_logits = sorted_pred_logits.gather(1, reverse_indices_extended) # (B, seq, emb)
         pred_logits = torch.cat(
             [shifted_pred_logits[:, 1:, :], shifted_sorted_pred_logits[:, -1:, :]],
             dim=1,

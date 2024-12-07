@@ -961,33 +961,17 @@ def cap_exp(value, cap=-1):
     return torch.exp(torch.clamp(value, max=cap))
 
 
-# def print_rich_table(df: pd.DataFrame) -> Table:
-#     console = Console()
-#     table = Table(show_lines=True)
-#     for column in df.columns:
-#         table.add_column(column)
-#     for _, row in df.iterrows():
-#         table.add_row(*row.astype(str).tolist())
-#     console.print(table)
-
-def print_rich_table(df: pd.DataFrame) -> None:
+def print_rich_table(df: pd.DataFrame) -> Table:
     console = Console()
     table = Table(show_lines=True)
-
-    # Add columns to the table
     for column in df.columns:
         table.add_column(column)
-
-    # Add rows with escaped content
     for _, row in df.iterrows():
-        escaped_row = [
-            Text.from_markup(str(cell), style=None) if isinstance(cell, str) else str(cell)
-            for cell in row
-        ]
-        table.add_row(*escaped_row)
-
-    # Print the table
+        table.add_row(*row.astype(str).tolist())
     console.print(table)
+
+
+
 
 
 SIMPLE_SFT_CHAT_TEMPLATE = "{% for message in messages %}{{' ' + message['content']}}{% endfor %}{{ eos_token }}"
@@ -1134,8 +1118,6 @@ def get_reward(
         lm_backbone = getattr(lm_backbone, lm_backbone.base_model_prefix)
     else:
         lm_backbone = getattr(model, model.base_model_prefix)
-    if query_responses.size(0) == 0:
-        pdb.set_trace()
 
     # replacing padding token with 0
     input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
@@ -1150,10 +1132,10 @@ def get_reward(
     )
 
     reward_logits = model.score(output.hidden_states[-1]) # (B,seq_len, 1)
-   
-    sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
-
-    
+    # for target input only
+    #sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
+    sequence_lengths = first_true_indices(query_responses == pad_token_id) - 1 
+        
     # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
     return (
         reward_logits,

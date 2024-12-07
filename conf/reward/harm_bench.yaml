@@ -3,15 +3,21 @@ defaults:
   - _self_
 
 llm_params:
-  model_name: "harm_bench_Llama2"
-  checkpoint: 'cais/HarmBench-Llama-2-13b-cls'
-  classification: false 
+  model_name: "harm_bench_Llama_4bit"
+  checkpoint: "RichardErkhov/cais_-_HarmBench-Llama-2-13b-cls-4bits"
+  quantization:
+    type: "load_in_4bit"
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_use_double_quant: True
 
-prompt_manager:
-  prompt_template: 
+
+prompt_manager: # use same prompt template for target llm since input prompt would be full_instruct
+  prompt_template:
     - key: system_message
-      msg: "<s>"
-    - key: hyper_instruct
-      msg: "{instruct}"  # loaded from context
-    - key: suffix
-      msg: "{suffix}"  # loaded from context
+      msg: "<s>[INST]"
+    - key: full_instruct
+      msg: "{full_instruct}"  # loaded from context
+    - key: separator
+      msg: "[/INST]"
+    - key: target
+      msg: "{target}"  # loaded from context

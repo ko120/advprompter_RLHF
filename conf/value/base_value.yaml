@@ -1,13 +1,11 @@
 llm_params:
-  device: 'cuda:4'
+  device: 'cuda:3'
   freeze: false
   dtype: float16
   classification: true
-  accelerator: true
   quantization: 
     type: None
 allow_non_ascii: false
 gen_params:
-  do_sample: true
-  temperature: 0.7
-  top_p: 0.92
+  max_new_tokens: 30
+  do_sample: false

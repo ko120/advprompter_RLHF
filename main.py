@@ -9,6 +9,7 @@ from accelerate import  Accelerator
 
 import csv
 import os
+
 import hydra
 import numpy as np
 import omegaconf
@@ -49,13 +50,12 @@ class Workspace:
         self.cfg = cfg
         self.verbose = cfg.verbose
         self.enable_wandb = cfg.wandb_params.enable_wandb
-        self.enable_accelerator = cfg.train.enable_accelerator
         self.starttime = datetime.now()
         
 
         if self.enable_wandb:
             self.init_wandb()
-
+       
         tqdm.write("Initializing Prompter...")
         self.prompter = LLM(cfg.prompter, verbose=self.verbose)
         tqdm.write("Initializing TargetLLM...")
@@ -64,7 +64,14 @@ class Workspace:
         self.affirmative_prefixes = read_csv_file(
             self.cfg.data.affirmative_prefixes_pth
         )
+        self.accelerator = Accelerator(gradient_accumulation_steps=2)
 
+        # if self.enable_accelerator:
+        #     self.prompter.device = accelerator.device
+        #     self.prompter.model = self.prompter.model.to(accelerator.device)
+        #     self.target_llm.device = accelerator.device
+        #     self.target_llm.model = self.target_llm.model.to(accelerator.device)
+            
         self.train_table = wandb.Table(columns=column_names)
         self.eval_table = wandb.Table(columns=column_names)
 
@@ -149,6 +156,17 @@ class Workspace:
             alpha=self.cfg.train.replay_buffer.priority_alpha,
             beta=1.0,
         )
+
+        self.train_loader = get_dataloader(
+            data_pth=self.cfg.train.dataset_pth,
+            shuffle=True,
+            augment_target=self.cfg.train.augment_target,
+            batch_size=self.cfg.train.batch_size,
+        )
+
+        self.prompter.model, self.train_loader, self.prompter_optimizer = self.accelerator.prepare(self.prompter.model, self.train_loader, 
+                                                                                    self.prompter_optimizer)
+
         # used later for finetune
         self.replay_buffer = ReplayBuffer(
             storage=ListStorage(self.cfg.train.replay_buffer.size),
@@ -187,15 +205,10 @@ class Workspace:
         self.prompter.train()
         self.target_llm.eval()
         train_metrics = Metrics(prefix="train/")
-        train_loader = get_dataloader(
-            data_pth=self.cfg.train.dataset_pth,
-            shuffle=True,
-            augment_target=self.cfg.train.augment_target,
-            batch_size=self.cfg.train.batch_size,
-        )
+        
         data = []
-
-        pbar_batches = tqdm(train_loader)
+        
+        pbar_batches = tqdm(self.train_loader)
         pbar_batches.set_description(f"Training epoch {self.epoch}")
         for batch_idx, batch in enumerate(pbar_batches):
             context = self.batch_to_context(batch)
@@ -428,7 +441,9 @@ class Workspace:
             loss_params=dict(hard_labels=True),
         )
         loss = prompter_tf_opt.loss
-        loss.backward()
+       
+        #loss.backward()
+        self.accelerator.backward(loss)
         self.prompter_optimizer.step()
         if self.enable_wandb:
             wandb.log({"regression_loss": loss.item()}, step=self.step)
